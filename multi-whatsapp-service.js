@@ -1,0 +1,426 @@
+const { default: makeWASocket, DisconnectReason, useMultiFileAuthState } = require('@whiskeysockets/baileys');
+const { Boom } = require('@hapi/boom');
+const qrcode = require('qrcode-terminal');
+const fs = require('fs');
+const path = require('path');
+const pino = require('pino');
+const { createClient } = require('@supabase/supabase-js');
+const dotenv = require('dotenv');
+
+// Load environment variables
+dotenv.config();
+
+// Supabase configuration - Replace with your actual values
+const SUPABASE_URL = process.env.SUPABASE_URL || '';
+const SUPABASE_KEY = process.env.SUPABASE_KEY || '';
+const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
+
+// Base directory for all sessions
+const BASE_SESSION_DIR = process.env.BASE_SESSION_DIR || './whatsapp_sessions';
+
+// Create base session directory if it doesn't exist
+if (!fs.existsSync(BASE_SESSION_DIR)) {
+    fs.mkdirSync(BASE_SESSION_DIR, { recursive: true });
+}
+
+// Class to manage multiple WhatsApp connections
+class MultiWhatsAppService {
+    constructor() {
+        this.connections = new Map(); // Map to store active connections
+        this.logger = pino({ level: 'error' });
+        this.supabase = supabase; // Expose supabase instance
+    }
+
+    // Initialize connections from Supabase
+    async initialize() {
+        try {
+            console.log('Initializing WhatsApp connections from database...');
+            
+            // Fetch all active integrations from Supabase
+            const { data, error } = await supabase
+                .from('integration_whatsapp_business')
+                .select('*')
+                .eq('active', true);
+                
+            if (error) {
+                throw new Error(`Failed to fetch WhatsApp integrations: ${error.message}`);
+            }
+            
+            console.log(`Found ${data.length} active WhatsApp integrations`);
+            
+            // Initialize each connection
+            for (const integration of data) {
+                await this.createConnection(integration);
+            }
+            
+            // Setup listener for database changes to automatically update connections
+            this.setupDatabaseListener();
+            
+            return true;
+        } catch (error) {
+            console.error('Error initializing WhatsApp service:', error);
+            return false;
+        }
+    }
+    
+    // Setup realtime subscription to the integrations table
+    setupDatabaseListener() {
+        const channel = supabase
+            .channel('integration_changes')
+            .on(
+                'postgres_changes',
+                {
+                    event: '*',
+                    schema: 'public',
+                    table: 'integration_whatsapp_business'
+                },
+                async (payload) => {
+                    const integration = payload.new;
+                    
+                    // Handle record updates
+                    if (payload.eventType === 'UPDATE') {
+                        if (integration.active && !this.connections.has(integration.id)) {
+                            // New active connection
+                            await this.createConnection(integration);
+                        } else if (!integration.active && this.connections.has(integration.id)) {
+                            // Connection deactivated
+                            await this.removeConnection(integration.id);
+                        }
+                    }
+                    
+                    // Handle new records
+                    if (payload.eventType === 'INSERT' && integration.active) {
+                        await this.createConnection(integration);
+                    }
+                    
+                    // Handle deleted records
+                    if (payload.eventType === 'DELETE' && this.connections.has(payload.old.id)) {
+                        await this.removeConnection(payload.old.id);
+                    }
+                }
+            )
+            .subscribe();
+    }
+    
+    // Create a single WhatsApp connection
+    async createConnection(integration) {
+        const { id, phone_number_id } = integration;
+        console.log(`Setting up WhatsApp connection for ${phone_number_id} (${id})`);
+        
+        // Create session directory for this specific connection
+        const sessionDir = path.join(BASE_SESSION_DIR, id.toString());
+        if (!fs.existsSync(sessionDir)) {
+            fs.mkdirSync(sessionDir, { recursive: true });
+        }
+        
+        try {
+            // Initialize auth state from the session directory
+            const { state, saveCreds } = await useMultiFileAuthState(sessionDir);
+            
+            // Create WhatsApp connection
+            const sock = makeWASocket({
+                auth: state,
+                printQRInTerminal: false, // Disable printing QR in terminal automatically
+                markOnlineOnConnect: false,
+                defaultQueryTimeoutMs: 60000,
+                logger: this.logger
+            });
+            
+            // Save credentials when updated
+            sock.ev.on('creds.update', saveCreds);
+            
+            // Handle connection updates
+            sock.ev.on('connection.update', async (update) => {
+                const { connection, lastDisconnect, qr } = update;
+                
+                // Handle QR code - only store it, don't display
+                if (qr) {
+                    // Store QR code and update status, but don't generate it
+                    await this.updateIntegrationStatus(id, 'awaiting_qr_scan', qr);
+                    
+                    // Log availability but don't generate
+                    console.log(`QR Code ready for ${phone_number_id} (${id}) at /api/connections/${id}/qr`);
+                }
+                
+                // Handle connection close
+                if (connection === 'close') {
+                    const shouldReconnect = (
+                        lastDisconnect.error instanceof Boom && 
+                        lastDisconnect.error.output?.statusCode !== DisconnectReason.loggedOut
+                    );
+                    
+                    console.log(`Connection closed for ${phone_number_id} (${id}) due to:`, 
+                        lastDisconnect.error?.output?.payload?.message || 'Unknown error');
+                    
+                    if (shouldReconnect) {
+                        console.log(`Reconnecting ${phone_number_id} (${id})...`);
+                        await this.updateIntegrationStatus(id, 'reconnecting');
+                        // Recreate connection
+                        setTimeout(() => this.createConnection(integration), 5000);
+                    } else {
+                        console.log(`Connection closed for ${phone_number_id} (${id}). Not reconnecting.`);
+                        await this.updateIntegrationStatus(id, 'disconnected');
+                        
+                        // If logged out, delete auth session
+                        if (lastDisconnect.error?.output?.statusCode === DisconnectReason.loggedOut) {
+                            console.log(`Logged out ${phone_number_id} (${id}). Deleting session files...`);
+                            try {
+                                fs.rmSync(sessionDir, { recursive: true, force: true });
+                                console.log(`Session files deleted for ${phone_number_id} (${id}).`);
+                            } catch (error) {
+                                console.error(`Error deleting session files for ${phone_number_id} (${id}):`, error);
+                            }
+                        }
+                        
+                        // Remove from active connections
+                        this.connections.delete(id);
+                    }
+                }
+                
+                // Handle successful connection
+                if (connection === 'open') {
+                    console.log(`Connected to WhatsApp for ${phone_number_id} (${id})!`);
+                    await this.updateIntegrationStatus(id, 'connected');
+                }
+            });
+            
+            // Handle incoming messages
+            sock.ev.on('messages.upsert', async (m) => {
+                if (m.type === 'notify') {
+                    for (const msg of m.messages) {
+                        // Skip broadcast messages
+                        if (msg.key.remoteJid === 'status@broadcast') continue;
+                        
+                        // Get message content
+                        const messageContent = msg.message?.conversation || 
+                                              msg.message?.extendedTextMessage?.text || 
+                                              msg.message?.imageMessage?.caption || 
+                                              'Media message';
+                        
+                        // Skip empty messages
+                        if (!messageContent) continue;
+                        
+                        // Get sender information
+                        const senderJid = msg.key.remoteJid;
+                        
+                        console.log(`New message for ${phone_number_id} (${id}) from ${senderJid}: ${messageContent}`);
+                        
+                        // Process message - You can add your chatbot logic here
+                        this.processIncomingMessage(id, integration, msg);
+                    }
+                }
+            });
+            
+            // Add utility functions to the socket
+            sock.sendSimpleText = async (jid, text) => {
+                return await sock.sendMessage(jid, { text });
+            };
+            
+            sock.sendImage = async (jid, imagePath, caption = '') => {
+                const image = fs.readFileSync(imagePath);
+                return await sock.sendMessage(jid, {
+                    image,
+                    caption
+                });
+            };
+            
+            // Store connection in the map
+            this.connections.set(id, {
+                sock: sock,
+                integration,
+                sessionDir,
+                status: 'connecting'
+            });
+            
+            return sock;
+        } catch (error) {
+            console.error(`Error in WhatsApp connection for ${phone_number_id} (${id}):`, error);
+            await this.updateIntegrationStatus(id, 'error', error.message);
+            return null;
+        }
+    }
+    
+    // Update integration status in Supabase
+    async updateIntegrationStatus(integrationId, status, additionalData = null) {
+        try {
+            // Update the connections map with the new status
+            if (this.connections.has(integrationId)) {
+                const connection = this.connections.get(integrationId);
+                connection.status = status;
+                
+                // If additionalData is a QR code, store it in the connection
+                if (additionalData && status === 'awaiting_qr_scan') {
+                    connection.qrCode = additionalData;
+                }
+                
+                // Update in Supabase (without the QR code data which is too large)
+                const { error } = await supabase
+                    .from('integration_whatsapp_business')
+                    .update({
+                        status: status,
+                        updated_at: new Date().toISOString()
+                    })
+                    .eq('id', integrationId);
+                
+                if (error) {
+                    console.error(`Error updating integration status in database for ${integrationId}:`, error);
+                }
+                // else {
+                //     console.log(`Updated integration status for ${integrationId} to ${status}`);
+                // }
+            }
+        } catch (error) {
+            console.error(`Error updating integration status for ${integrationId}:`, error);
+        }
+    }
+    
+    // Get QR code for a specific integration
+    getQRCode(integrationId) {
+        if (!this.connections.has(integrationId)) {
+            return null;
+        }
+        
+        const connection = this.connections.get(integrationId);
+        const qrCode = connection.qrCode || null;
+        
+        // If there is a QR code, display it in the console when specifically requested
+        if (qrCode) {
+            const integration = connection.integration;
+            console.log(`\nDisplaying QR Code for ${integration.phone_number_id} (${integrationId}):`);
+            qrcode.generate(qrCode, { small: true });
+        }
+        
+        return qrCode;
+    }
+    
+    // Force generate QR code for a specific integration (for refreshing)
+    async forceGenerateQR(integrationId) {
+        if (!this.connections.has(integrationId)) {
+            return false;
+        }
+        
+        try {
+            const connection = this.connections.get(integrationId);
+            const sock = connection.sock;
+            
+            // Request new QR code by forcing a reconnection
+            if (sock) {
+                sock.ev.emit('connection.update', { qr: null });
+                console.log(`Requested new QR code for integration ${integrationId}`);
+                return true;
+            }
+            
+            return false;
+        } catch (error) {
+            console.error(`Error generating QR for ${integrationId}:`, error);
+            return false;
+        }
+    }
+    
+    // Get detailed status of a connection
+    getConnectionStatus(integrationId) {
+        if (!this.connections.has(integrationId)) {
+            return {
+                exists: false,
+                status: 'not_found'
+            };
+        }
+        
+        const connection = this.connections.get(integrationId);
+        return {
+            exists: true,
+            status: connection.status,
+            phoneNumberId: connection.integration.phone_number_id,
+            hasQR: !!connection.qrCode,
+            projectId: connection.integration.project_id
+        };
+    }
+    
+    // Process incoming message (implement your chatbot logic here)
+    async processIncomingMessage(integrationId, integration, message) {
+        const senderJid = message.key.remoteJid;
+        const messageContent = message.message?.conversation || 
+                             message.message?.extendedTextMessage?.text || 
+                             message.message?.imageMessage?.caption || 
+                             'Media message';
+        
+        // TODO: Implement your chatbot logic here
+        // This is where you would connect to your Python backend or LangChain chatbot
+        
+        // For now, just echo the message back
+        await this.sendMessage(integrationId, senderJid, `Echo: ${messageContent}`);
+    }
+    
+    // Remove a connection
+    async removeConnection(integrationId) {
+        if (!this.connections.has(integrationId)) {
+            return false;
+        }
+        
+        const connection = this.connections.get(integrationId);
+        console.log(`Removing WhatsApp connection for ${connection.integration.phone_number_id} (${integrationId})`);
+        
+        try {
+            // Close the socket properly if possible
+            if (connection.sock) {
+                // Baileys doesn't have a formal way to close connections,
+                // but we can remove listeners to allow garbage collection
+                connection.sock.ev.removeAllListeners();
+            }
+            
+            // Remove from our connections map
+            this.connections.delete(integrationId);
+            
+            return true;
+        } catch (error) {
+            console.error(`Error removing connection for ${integrationId}:`, error);
+            return false;
+        }
+    }
+    
+    // Send a message using a specific connection
+    async sendMessage(integrationId, jid, text) {
+        if (!this.connections.has(integrationId)) {
+            throw new Error(`No active connection found for integration ID: ${integrationId}`);
+        }
+        
+        const connection = this.connections.get(integrationId);
+        
+        try {
+            return await connection.sock.sendSimpleText(jid, text);
+        } catch (error) {
+            console.error(`Error sending message for ${integrationId}:`, error);
+            throw error;
+        }
+    }
+    
+    // Send an image using a specific connection
+    async sendImage(integrationId, jid, imagePath, caption = '') {
+        if (!this.connections.has(integrationId)) {
+            throw new Error(`No active connection found for integration ID: ${integrationId}`);
+        }
+        
+        const connection = this.connections.get(integrationId);
+        
+        try {
+            return await connection.sock.sendImage(jid, imagePath, caption);
+        } catch (error) {
+            console.error(`Error sending image for ${integrationId}:`, error);
+            throw error;
+        }
+    }
+    
+    // Get all active connections
+    getActiveConnections() {
+        return Array.from(this.connections.entries()).map(([id, conn]) => ({
+            id,
+            phoneNumberId: conn.integration.phone_number_id,
+            status: conn.status,
+            projectId: conn.integration.project_id
+        }));
+    }
+}
+
+// Export a singleton instance
+const whatsappService = new MultiWhatsAppService();
+module.exports = whatsappService;
