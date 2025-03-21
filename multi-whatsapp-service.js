@@ -120,157 +120,182 @@ class MultiWhatsAppService {
         const { id, phone_number_id } = integration;
         logger.info({ integrationId: id, phoneNumberId: phone_number_id }, 'Setting up WhatsApp connection');
         
-        // Create session directory for this specific connection
-        const sessionDir = path.join(BASE_SESSION_DIR, id.toString());
-        if (!fs.existsSync(sessionDir)) {
-            fs.mkdirSync(sessionDir, { recursive: true });
-        }
+        let retryCount = 0;
+        const maxRetries = 3;
         
-        try {
-            // Initialize auth state from the session directory
-            const { state, saveCreds } = await useMultiFileAuthState(sessionDir);
-            
-            // Create WhatsApp connection
-            const sock = makeWASocket({
-                auth: state,
-                printQRInTerminal: false, // Disable printing QR in terminal automatically
-                markOnlineOnConnect: false,
-                defaultQueryTimeoutMs: 60000,
-                logger: pino({ level: 'silent' })
-            });
-            
-            // Save credentials when updated
-            sock.ev.on('creds.update', saveCreds);
-            
-            // Handle connection updates
-            sock.ev.on('connection.update', async (update) => {
-                const { connection, lastDisconnect, qr } = update;
-                
-                // Handle QR code - only store it, don't display
-                if (qr) {
-                    // Store QR code and update status, but don't generate it
-                    await this.updateIntegrationStatus(id, 'awaiting_qr_scan', qr);
-                    
-                    // Log availability but don't generate
-                    logger.info({ integrationId: id, phoneNumberId: phone_number_id }, 'QR Code ready');
+        const attemptConnection = async () => {
+            try {
+                // Create session directory for this specific connection
+                const sessionDir = path.join(BASE_SESSION_DIR, id.toString());
+                if (!fs.existsSync(sessionDir)) {
+                    fs.mkdirSync(sessionDir, { recursive: true });
                 }
                 
-                // Handle connection close
-                if (connection === 'close') {
-                    const shouldReconnect = (
-                        lastDisconnect.error instanceof Boom && 
-                        lastDisconnect.error.output?.statusCode !== DisconnectReason.loggedOut
-                    );
+                // Initialize auth state from the session directory
+                const { state, saveCreds } = await useMultiFileAuthState(sessionDir);
+                
+                logger.info({ integrationId: id }, 'Auth state initialized');
+                
+                // Create WhatsApp connection
+                const sock = makeWASocket({
+                    auth: state,
+                    printQRInTerminal: false,
+                    markOnlineOnConnect: false,
+                    defaultQueryTimeoutMs: 60000,
+                    logger: pino({ level: 'silent' }),
+                    browser: ['Ublix WSP', 'Chrome', '1.0.0'],
+                    connectTimeoutMs: 60000,
+                    keepAliveIntervalMs: 30000,
+                    retryRequestDelayMs: 5000,
+                    emitOwnEvents: true
+                });
+                
+                // Save credentials when updated
+                sock.ev.on('creds.update', saveCreds);
+                
+                // Handle connection updates
+                sock.ev.on('connection.update', async (update) => {
+                    const { connection, lastDisconnect, qr } = update;
                     
-                    logger.warn(
-                        { 
-                            integrationId: id, 
-                            phoneNumberId: phone_number_id,
-                            error: lastDisconnect.error?.output?.payload?.message || 'Unknown error'
-                        }, 
-                        'Connection closed'
-                    );
-                    
-                    if (shouldReconnect) {
-                        logger.info({ integrationId: id, phoneNumberId: phone_number_id }, 'Reconnecting');
-                        await this.updateIntegrationStatus(id, 'reconnecting');
-                        // Recreate connection
-                        setTimeout(() => this.createConnection(integration), 5000);
-                    } else {
-                        logger.info({ integrationId: id, phoneNumberId: phone_number_id }, 'Connection closed permanently');
-                        await this.updateIntegrationStatus(id, 'disconnected');
+                    // Handle QR code - only store it, don't display
+                    if (qr) {
+                        // Store QR code and update status, but don't generate it
+                        await this.updateIntegrationStatus(id, 'awaiting_qr_scan', qr);
                         
-                        // If logged out, delete auth session
-                        if (lastDisconnect.error?.output?.statusCode === DisconnectReason.loggedOut) {
-                            logger.info({ integrationId: id, phoneNumberId: phone_number_id }, 'Deleting session files');
-                            try {
-                                fs.rmSync(sessionDir, { recursive: true, force: true });
-                                logger.info({ integrationId: id, phoneNumberId: phone_number_id }, 'Session files deleted');
-                            } catch (error) {
-                                logger.error(
-                                    { err: error, integrationId: id, phoneNumberId: phone_number_id },
-                                    'Error deleting session files'
-                                );
-                            }
-                        }
-                        
-                        // Remove from active connections
-                        this.connections.delete(id);
+                        // Log availability but don't generate
+                        logger.info({ integrationId: id, phoneNumberId: phone_number_id }, 'QR Code ready');
                     }
-                }
-                
-                // Handle successful connection
-                if (connection === 'open') {
-                    logger.info({ integrationId: id, phoneNumberId: phone_number_id }, 'Connected to WhatsApp');
-                    await this.updateIntegrationStatus(id, 'connected');
-                }
-            });
-            
-            // Handle incoming messages
-            sock.ev.on('messages.upsert', async (m) => {
-                if (m.type === 'notify') {
-                    for (const msg of m.messages) {
-                        // Skip broadcast messages
-                        if (msg.key.remoteJid === 'status@broadcast') continue;
+                    
+                    // Handle connection close
+                    if (connection === 'close') {
+                        const shouldReconnect = (
+                            lastDisconnect.error instanceof Boom && 
+                            lastDisconnect.error.output?.statusCode !== DisconnectReason.loggedOut
+                        );
                         
-                        // Get message content
-                        const messageContent = msg.message?.conversation || 
-                                              msg.message?.extendedTextMessage?.text || 
-                                              msg.message?.imageMessage?.caption || 
-                                              'Media message';
-                        
-                        // Skip empty messages
-                        if (!messageContent) continue;
-                        
-                        // Get sender information
-                        const senderJid = msg.key.remoteJid;
-                        
-                        logger.info(
+                        logger.warn(
                             { 
                                 integrationId: id, 
                                 phoneNumberId: phone_number_id,
-                                sender: senderJid,
-                                message: messageContent
-                            },
-                            'New message received'
+                                error: lastDisconnect.error?.output?.payload?.message || 'Unknown error',
+                                statusCode: lastDisconnect.error?.output?.statusCode,
+                                fullError: JSON.stringify(lastDisconnect.error)
+                            }, 
+                            'Connection closed'
                         );
                         
-                        // Process message - You can add your chatbot logic here
-                        this.processIncomingMessage(id, integration, msg);
+                        if (shouldReconnect) {
+                            logger.info({ integrationId: id, phoneNumberId: phone_number_id }, 'Reconnecting');
+                            await this.updateIntegrationStatus(id, 'reconnecting');
+                            // Recreate connection
+                            setTimeout(() => this.createConnection(integration), 5000);
+                        } else {
+                            logger.info({ integrationId: id, phoneNumberId: phone_number_id }, 'Connection closed permanently');
+                            await this.updateIntegrationStatus(id, 'disconnected');
+                            
+                            // If logged out, delete auth session
+                            if (lastDisconnect.error?.output?.statusCode === DisconnectReason.loggedOut) {
+                                logger.info({ integrationId: id, phoneNumberId: phone_number_id }, 'Deleting session files');
+                                try {
+                                    fs.rmSync(sessionDir, { recursive: true, force: true });
+                                    logger.info({ integrationId: id, phoneNumberId: phone_number_id }, 'Session files deleted');
+                                } catch (error) {
+                                    logger.error(
+                                        { err: error, integrationId: id, phoneNumberId: phone_number_id },
+                                        'Error deleting session files'
+                                    );
+                                }
+                            }
+                            
+                            // Remove from active connections
+                            this.connections.delete(id);
+                        }
                     }
-                }
-            });
-            
-            // Add utility functions to the socket
-            sock.sendSimpleText = async (jid, text) => {
-                return await sock.sendMessage(jid, { text });
-            };
-            
-            sock.sendImage = async (jid, imagePath, caption = '') => {
-                const image = fs.readFileSync(imagePath);
-                return await sock.sendMessage(jid, {
-                    image,
-                    caption
+                    
+                    // Handle successful connection
+                    if (connection === 'open') {
+                        logger.info({ integrationId: id, phoneNumberId: phone_number_id }, 'Connected to WhatsApp');
+                        await this.updateIntegrationStatus(id, 'connected');
+                    }
                 });
-            };
-            
-            // Store connection in the map
-            this.connections.set(id, {
-                sock: sock,
-                integration,
-                sessionDir,
-                status: 'connecting'
-            });
-            
-            return sock;
-        } catch (error) {
-            logger.error(
-                { err: error, integrationId: id, phoneNumberId: phone_number_id },
-                'Error in WhatsApp connection'
-            );
-            await this.updateIntegrationStatus(id, 'error', error.message);
-            return null;
+                
+                // Handle incoming messages
+                sock.ev.on('messages.upsert', async (m) => {
+                    if (m.type === 'notify') {
+                        for (const msg of m.messages) {
+                            // Skip broadcast messages
+                            if (msg.key.remoteJid === 'status@broadcast') continue;
+                            
+                            // Get message content
+                            const messageContent = msg.message?.conversation || 
+                                                  msg.message?.extendedTextMessage?.text || 
+                                                  msg.message?.imageMessage?.caption || 
+                                                  'Media message';
+                            
+                            // Skip empty messages
+                            if (!messageContent) continue;
+                            
+                            // Get sender information
+                            const senderJid = msg.key.remoteJid;
+                            
+                            logger.info(
+                                { 
+                                    integrationId: id, 
+                                    phoneNumberId: phone_number_id,
+                                    sender: senderJid,
+                                    message: messageContent
+                                },
+                                'New message received'
+                            );
+                            
+                            // Process message - You can add your chatbot logic here
+                            this.processIncomingMessage(id, integration, msg);
+                        }
+                    }
+                });
+                
+                // Add utility functions to the socket
+                sock.sendSimpleText = async (jid, text) => {
+                    return await sock.sendMessage(jid, { text });
+                };
+                
+                sock.sendImage = async (jid, imagePath, caption = '') => {
+                    const image = fs.readFileSync(imagePath);
+                    return await sock.sendMessage(jid, {
+                        image,
+                        caption
+                    });
+                };
+                
+                // Store connection in the map
+                this.connections.set(id, {
+                    sock: sock,
+                    integration,
+                    sessionDir,
+                    status: 'connecting'
+                });
+                
+                return sock;
+            } catch (error) {
+                logger.error(
+                    { err: error, integrationId: id, phoneNumberId: phone_number_id },
+                    'Error in WhatsApp connection'
+                );
+                await this.updateIntegrationStatus(id, 'error', error.message);
+                return null;
+            }
         }
+        
+        while (retryCount < maxRetries) {
+            retryCount++;
+            logger.info({ integrationId: id }, `Attempting connection, attempt ${retryCount} of ${maxRetries}`);
+            const sock = await attemptConnection();
+            if (sock) {
+                return sock;
+            }
+        }
+        
+        return null;
     }
     
     // Update integration status in Supabase
