@@ -5,6 +5,19 @@ const fs = require('fs');
 const path = require('path');
 const pino = require('pino');
 
+// Configuración del logger
+const logger = pino({
+    level: process.env.NODE_ENV === 'production' ? 'info' : 'debug',
+    transport: {
+        target: 'pino-pretty',
+        options: {
+            colorize: true,
+            translateTime: 'SYS:standard',
+            ignore: 'pid,hostname'
+        }
+    }
+});
+
 // Session directory
 const SESSION_DIR = './auth_session';
 
@@ -19,28 +32,25 @@ async function connectToWhatsApp() {
         // Use the file system to store authentication data
         const { state, saveCreds } = await useMultiFileAuthState(SESSION_DIR);
         
-        // Create a proper logger with pino
-        const logger = pino({ level: 'error' });
-        
         // Create a WhatsApp connection
         const sock = makeWASocket({
             auth: state,
-            printQRInTerminal: true, // Display QR code in terminal
-            markOnlineOnConnect: false, // Don't automatically mark as online
-            defaultQueryTimeoutMs: 60000, // Increase timeout for requests
-            logger // Usar el logger de pino
+            printQRInTerminal: true,
+            markOnlineOnConnect: false,
+            defaultQueryTimeoutMs: 60000,
+            logger: pino({ level: 'silent' })
         });
         
         // Save credentials when updated
         sock.ev.on('creds.update', saveCreds);
         
-        // Handle connection updates (connecting, QR code scan, connection closed)
+        // Handle connection updates
         sock.ev.on('connection.update', (update) => {
             const { connection, lastDisconnect, qr } = update;
             
             // If QR code is available, display it in terminal
             if (qr) {
-                console.log('\nQR Code received, scan using WhatsApp app:');
+                logger.info('QR Code received, scan using WhatsApp app');
                 qrcode.generate(qr, { small: true });
             }
             
@@ -49,21 +59,24 @@ async function connectToWhatsApp() {
                 const shouldReconnect = (lastDisconnect.error instanceof Boom && 
                     lastDisconnect.error.output?.statusCode !== DisconnectReason.loggedOut);
                 
-                console.log('Connection closed due to:', lastDisconnect.error?.output?.payload?.message || 'Unknown error');
+                logger.warn(
+                    { error: lastDisconnect.error?.output?.payload?.message || 'Unknown error' },
+                    'Connection closed'
+                );
                 
                 if (shouldReconnect) {
-                    console.log('Reconnecting...');
+                    logger.info('Reconnecting...');
                     connectToWhatsApp();
                 } else {
-                    console.log('Connection closed. Not reconnecting.');
+                    logger.info('Connection closed. Not reconnecting.');
                     // If logged out, delete auth session
                     if (lastDisconnect.error?.output?.statusCode === DisconnectReason.loggedOut) {
-                        console.log('Logged out. Deleting session files...');
+                        logger.info('Logged out. Deleting session files...');
                         try {
                             fs.rmSync(SESSION_DIR, { recursive: true, force: true });
-                            console.log('Session files deleted. Please restart the application.');
+                            logger.info('Session files deleted. Please restart the application.');
                         } catch (error) {
-                            console.error('Error deleting session files:', error);
+                            logger.error({ err: error }, 'Error deleting session files');
                         }
                     }
                 }
@@ -71,7 +84,7 @@ async function connectToWhatsApp() {
             
             // If connected, log success
             if (connection === 'open') {
-                console.log('Connected to WhatsApp!');
+                logger.info('Connected to WhatsApp!');
             }
         });
         
@@ -84,9 +97,9 @@ async function connectToWhatsApp() {
                     
                     // Get message content
                     const messageContent = msg.message?.conversation || 
-                                          msg.message?.extendedTextMessage?.text || 
-                                          msg.message?.imageMessage?.caption || 
-                                          'Media message';
+                                      msg.message?.extendedTextMessage?.text || 
+                                      msg.message?.imageMessage?.caption || 
+                                      'Media message';
                     
                     // Skip empty messages
                     if (!messageContent) continue;
@@ -94,7 +107,7 @@ async function connectToWhatsApp() {
                     // Get sender information
                     const senderJid = msg.key.remoteJid;
                     
-                    console.log(`New message from ${senderJid}: ${messageContent}`);
+                    logger.info({ sender: senderJid, message: messageContent }, 'New message received');
                     
                     // Example: Reply to message
                     await sock.sendMessage(senderJid, { text: `Received your message: ${messageContent}` });
@@ -117,17 +130,17 @@ async function connectToWhatsApp() {
         
         return sock;
     } catch (error) {
-        console.error('Error in WhatsApp connection:', error);
+        logger.error({ err: error }, 'Error in WhatsApp connection');
     }
 }
 
 // Start WhatsApp connection
 connectToWhatsApp()
     .then(sock => {
-        console.log('WhatsApp client initialized');
+        logger.info('WhatsApp client initialized');
         // You can use sock to send messages programmatically
         global.waSocket = sock; // Make it accessible globally
     })
-    .catch(err => console.error('Error initializing WhatsApp client:', err));
+    .catch(err => logger.error({ err }, 'Error initializing WhatsApp client'));
 
-console.log('WhatsApp client starting...'); 
+logger.info('WhatsApp client starting...'); 

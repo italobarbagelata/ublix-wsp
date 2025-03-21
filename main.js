@@ -4,30 +4,77 @@
  */
 
 const dotenv = require('dotenv');
+const { app } = require('./api');
+const whatsappService = require('./multi-whatsapp-service');
+const pino = require('pino');
+
+// Configuración del logger
+const logger = pino({
+    level: process.env.NODE_ENV === 'production' ? 'info' : 'debug',
+    transport: {
+        target: 'pino-pretty',
+        options: {
+            colorize: true,
+            translateTime: 'SYS:standard',
+            ignore: 'pid,hostname'
+        }
+    }
+});
 
 // Load environment variables
 dotenv.config();
 
-console.log('Starting WhatsApp Multi-Connection Service...');
+async function main() {
+    try {
+        logger.info('Starting WhatsApp Multi-Connection Service...');
 
-// Import the WhatsApp service
-const whatsappService = require('./multi-whatsapp-service');
+        // Initialize WhatsApp service
+        const success = await whatsappService.initialize();
 
-// Initialize the WhatsApp service
-whatsappService.initialize()
-    .then(success => {
         if (success) {
-            console.log('WhatsApp service initialized successfully');
+            logger.info('WhatsApp service initialized successfully');
         } else {
-            console.error('WhatsApp service initialization failed');
+            logger.error('WhatsApp service initialization failed');
+            process.exit(1);
         }
-        
-        // Start the API server
-        const { app } = require('./api');
-        
-        console.log('WhatsApp service and API server are running...');
-    })
-    .catch(error => {
-        console.error('Failed to initialize WhatsApp service:', error);
+
+        // Start API server
+        const PORT = process.env.PORT || 3002;
+        const server = app.listen(PORT, () => {
+            logger.info(`API server running on port ${PORT}`);
+            logger.info('Available endpoints:');
+            logger.info(`- Check status: GET http://localhost:${PORT}/api/status`);
+            logger.info(`- Get connections: GET http://localhost:${PORT}/api/connections`);
+            logger.info(`- Send message: POST http://localhost:${PORT}/api/send-message`);
+            logger.info(`- Send image: POST http://localhost:${PORT}/api/send-image`);
+            logger.info(`Documentación de Swagger disponible en http://localhost:${PORT}/api-docs`);
+        });
+
+        // Handle server shutdown
+        process.on('SIGINT', () => {
+            logger.info('Shutting down server...');
+            server.close(() => {
+                logger.info('Server shut down.');
+                process.exit(0);
+            });
+        });
+
+    } catch (error) {
+        logger.error({ err: error }, 'Failed to initialize WhatsApp service');
         process.exit(1);
-    }); 
+    }
+}
+
+// Handle uncaught exceptions
+process.on('uncaughtException', (error) => {
+    logger.fatal(error, 'Uncaught Exception');
+    process.exit(1);
+});
+
+// Handle unhandled promise rejections
+process.on('unhandledRejection', (reason, promise) => {
+    logger.fatal({ reason, promise }, 'Unhandled Promise Rejection');
+    process.exit(1);
+});
+
+main(); 

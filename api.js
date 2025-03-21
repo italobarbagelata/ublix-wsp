@@ -4,6 +4,22 @@ const cors = require('cors');
 const fs = require('fs');
 const path = require('path');
 const dotenv = require('dotenv');
+const swaggerJsDoc = require('swagger-jsdoc');
+const swaggerUi = require('swagger-ui-express');
+const pino = require('pino');
+
+// Configuración del logger
+const logger = pino({
+    level: process.env.NODE_ENV === 'production' ? 'info' : 'debug',
+    transport: {
+        target: 'pino-pretty',
+        options: {
+            colorize: true,
+            translateTime: 'SYS:standard',
+            ignore: 'pid,hostname'
+        }
+    }
+});
 
 // Load environment variables
 dotenv.config();
@@ -19,9 +35,32 @@ const PORT = process.env.PORT || 3002;
 app.use(bodyParser.json());
 app.use(cors());
 
+// Configuración de Swagger
+const swaggerOptions = {
+  definition: {
+    openapi: '3.0.0',
+    info: {
+      title: 'WhatsApp API',
+      version: '1.0.0',
+      description: 'API para interactuar con WhatsApp usando Baileys',
+      contact: {
+        name: 'API Support',
+      },
+    },
+    servers: [
+      {
+        url: `http://localhost:${PORT}`,
+        description: 'Servidor de desarrollo',
+      },
+    ],
+  },
+  apis: ['./api.js'], // Archivos que contienen anotaciones JSDoc
+};
+
 // Check if WhatsApp service is initialized
 const checkService = (req, res, next) => {
     if (!whatsappService) {
+        logger.error('WhatsApp service not initialized');
         return res.status(503).json({
             success: false,
             message: 'WhatsApp service not initialized'
@@ -32,7 +71,31 @@ const checkService = (req, res, next) => {
 
 // Routes
 
-// Server status
+/**
+ * @swagger
+ * /api/status:
+ *   get:
+ *     summary: Obtener el estado del servidor
+ *     description: Retorna el estado del servidor y la información de las conexiones de WhatsApp activas
+ *     responses:
+ *       200:
+ *         description: Estado del servidor
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 success:
+ *                   type: boolean
+ *                 status:
+ *                   type: string
+ *                 whatsapp_service_initialized:
+ *                   type: boolean
+ *                 active_connections:
+ *                   type: integer
+ *                 connections:
+ *                   type: array
+ */
 app.get('/api/status', (req, res) => {
     const connections = whatsappService ? whatsappService.getActiveConnections() : [];
     res.json({
@@ -44,7 +107,18 @@ app.get('/api/status', (req, res) => {
     });
 });
 
-// Get all connections
+/**
+ * @swagger
+ * /api/connections:
+ *   get:
+ *     summary: Obtener todas las conexiones activas
+ *     description: Retorna información sobre todas las conexiones de WhatsApp activas
+ *     responses:
+ *       200:
+ *         description: Lista de conexiones activas
+ *       503:
+ *         description: Servicio de WhatsApp no inicializado
+ */
 app.get('/api/connections', checkService, (req, res) => {
     try {
         const connections = whatsappService.getActiveConnections();
@@ -62,12 +136,48 @@ app.get('/api/connections', checkService, (req, res) => {
     }
 });
 
-// Send message through a specific connection
+/**
+ * @swagger
+ * /api/send-message:
+ *   post:
+ *     summary: Enviar un mensaje de texto
+ *     description: Envía un mensaje de texto a través de una conexión específica de WhatsApp
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required:
+ *               - phone
+ *               - message
+ *               - integrationId
+ *             properties:
+ *               phone:
+ *                 type: string
+ *                 description: Número de teléfono con o sin formato @s.whatsapp.net
+ *               message:
+ *                 type: string
+ *                 description: Texto del mensaje a enviar
+ *               integrationId:
+ *                 type: string
+ *                 description: ID de la conexión de WhatsApp a utilizar
+ *     responses:
+ *       200:
+ *         description: Mensaje enviado correctamente
+ *       400:
+ *         description: Faltan parámetros requeridos
+ *       500:
+ *         description: Error al enviar mensaje
+ *       503:
+ *         description: Servicio de WhatsApp no inicializado
+ */
 app.post('/api/send-message', checkService, async (req, res) => {
     try {
         const { phone, message, integrationId } = req.body;
         
         if (!phone || !message || !integrationId) {
+            logger.warn('Missing required parameters for send-message');
             return res.status(400).json({
                 success: false,
                 message: 'Phone number, message, and integrationId are required'
@@ -82,12 +192,14 @@ app.post('/api/send-message', checkService, async (req, res) => {
         // Send message
         await whatsappService.sendMessage(integrationId, formattedPhone, message);
         
+        logger.info({ integrationId, phone: formattedPhone }, 'Message sent successfully');
+        
         res.json({
             success: true,
             message: 'Message sent successfully'
         });
     } catch (error) {
-        console.error('Error sending message:', error);
+        logger.error({ err: error, integrationId: req.body.integrationId }, 'Error sending message');
         res.status(500).json({
             success: false,
             message: 'Error sending message',
@@ -96,7 +208,47 @@ app.post('/api/send-message', checkService, async (req, res) => {
     }
 });
 
-// Send image through a specific connection
+/**
+ * @swagger
+ * /api/send-image:
+ *   post:
+ *     summary: Enviar una imagen
+ *     description: Envía una imagen a través de una conexión específica de WhatsApp
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required:
+ *               - phone
+ *               - image
+ *               - integrationId
+ *             properties:
+ *               phone:
+ *                 type: string
+ *                 description: Número de teléfono con o sin formato @s.whatsapp.net
+ *               image:
+ *                 type: string
+ *                 description: Ruta de la imagen a enviar
+ *               caption:
+ *                 type: string
+ *                 description: Texto opcional para la imagen
+ *               integrationId:
+ *                 type: string
+ *                 description: ID de la conexión de WhatsApp a utilizar
+ *     responses:
+ *       200:
+ *         description: Imagen enviada correctamente
+ *       400:
+ *         description: Faltan parámetros requeridos
+ *       404:
+ *         description: Archivo de imagen no encontrado
+ *       500:
+ *         description: Error al enviar imagen
+ *       503:
+ *         description: Servicio de WhatsApp no inicializado
+ */
 app.post('/api/send-image', checkService, async (req, res) => {
     try {
         const { phone, image, caption, integrationId } = req.body;
@@ -138,7 +290,29 @@ app.post('/api/send-image', checkService, async (req, res) => {
     }
 });
 
-// Get connection status
+/**
+ * @swagger
+ * /api/connections/{integrationId}:
+ *   get:
+ *     summary: Obtener estado de una conexión
+ *     description: Obtiene el estado de una conexión específica de WhatsApp
+ *     parameters:
+ *       - in: path
+ *         name: integrationId
+ *         required: true
+ *         schema:
+ *           type: string
+ *         description: ID de la conexión
+ *     responses:
+ *       200:
+ *         description: Estado de la conexión
+ *       404:
+ *         description: Conexión no encontrada
+ *       500:
+ *         description: Error al obtener estado
+ *       503:
+ *         description: Servicio de WhatsApp no inicializado
+ */
 app.get('/api/connections/:integrationId', checkService, async (req, res) => {
     try {
         const { integrationId } = req.params;
@@ -165,7 +339,29 @@ app.get('/api/connections/:integrationId', checkService, async (req, res) => {
     }
 });
 
-// Get QR code for a specific connection
+/**
+ * @swagger
+ * /api/connections/{integrationId}/qr:
+ *   get:
+ *     summary: Obtener código QR
+ *     description: Obtiene el código QR para una conexión específica
+ *     parameters:
+ *       - in: path
+ *         name: integrationId
+ *         required: true
+ *         schema:
+ *           type: string
+ *         description: ID de la conexión
+ *     responses:
+ *       200:
+ *         description: Código QR
+ *       404:
+ *         description: Código QR no disponible
+ *       500:
+ *         description: Error al obtener código QR
+ *       503:
+ *         description: Servicio de WhatsApp no inicializado
+ */
 app.get('/api/connections/:integrationId/qr', checkService, async (req, res) => {
     try {
         const { integrationId } = req.params;
@@ -192,7 +388,34 @@ app.get('/api/connections/:integrationId/qr', checkService, async (req, res) => 
     }
 });
 
-// Get QR code as an image for a specific connection
+/**
+ * @swagger
+ * /api/connections/{integrationId}/qr-image:
+ *   get:
+ *     summary: Obtener imagen de código QR
+ *     description: Obtiene el código QR como imagen para una conexión específica
+ *     parameters:
+ *       - in: path
+ *         name: integrationId
+ *         required: true
+ *         schema:
+ *           type: string
+ *         description: ID de la conexión
+ *     responses:
+ *       200:
+ *         description: Imagen del código QR (PNG)
+ *         content:
+ *           image/png:
+ *             schema:
+ *               type: string
+ *               format: binary
+ *       404:
+ *         description: Código QR no disponible
+ *       500:
+ *         description: Error al generar imagen
+ *       503:
+ *         description: Servicio de WhatsApp no inicializado
+ */
 app.get('/api/connections/:integrationId/qr-image', checkService, async (req, res) => {
     try {
         const { integrationId } = req.params;
@@ -226,7 +449,29 @@ app.get('/api/connections/:integrationId/qr-image', checkService, async (req, re
     }
 });
 
-// Force refresh connection
+/**
+ * @swagger
+ * /api/connections/{integrationId}/refresh:
+ *   post:
+ *     summary: Refrescar conexión
+ *     description: Fuerza el reinicio de una conexión específica
+ *     parameters:
+ *       - in: path
+ *         name: integrationId
+ *         required: true
+ *         schema:
+ *           type: string
+ *         description: ID de la conexión
+ *     responses:
+ *       200:
+ *         description: Proceso de refresco iniciado
+ *       404:
+ *         description: Conexión no encontrada
+ *       500:
+ *         description: Error al refrescar conexión
+ *       503:
+ *         description: Servicio de WhatsApp no inicializado
+ */
 app.post('/api/connections/:integrationId/refresh', checkService, async (req, res) => {
     try {
         const { integrationId } = req.params;
@@ -276,7 +521,29 @@ app.post('/api/connections/:integrationId/refresh', checkService, async (req, re
     }
 });
 
-// Force QR code generation for a specific connection
+/**
+ * @swagger
+ * /api/connections/{integrationId}/generate-qr:
+ *   post:
+ *     summary: Generar código QR
+ *     description: Fuerza la generación de un nuevo código QR para una conexión
+ *     parameters:
+ *       - in: path
+ *         name: integrationId
+ *         required: true
+ *         schema:
+ *           type: string
+ *         description: ID de la conexión
+ *     responses:
+ *       200:
+ *         description: Generación de código QR iniciada
+ *       404:
+ *         description: Conexión no encontrada
+ *       500:
+ *         description: Error al generar código QR
+ *       503:
+ *         description: Servicio de WhatsApp no inicializado
+ */
 app.post('/api/connections/:integrationId/generate-qr', checkService, async (req, res) => {
     try {
         const { integrationId } = req.params;
@@ -305,7 +572,29 @@ app.post('/api/connections/:integrationId/generate-qr', checkService, async (req
     }
 });
 
-// Logout and delete session for a specific connection
+/**
+ * @swagger
+ * /api/connections/{integrationId}/logout:
+ *   post:
+ *     summary: Cerrar sesión
+ *     description: Cierra sesión y elimina los archivos de sesión para una conexión
+ *     parameters:
+ *       - in: path
+ *         name: integrationId
+ *         required: true
+ *         schema:
+ *           type: string
+ *         description: ID de la conexión
+ *     responses:
+ *       200:
+ *         description: Sesión cerrada y eliminada correctamente
+ *       404:
+ *         description: Conexión no encontrada
+ *       500:
+ *         description: Error al cerrar sesión
+ *       503:
+ *         description: Servicio de WhatsApp no inicializado
+ */
 app.post('/api/connections/:integrationId/logout', checkService, async (req, res) => {
     try {
         const { integrationId } = req.params;
@@ -340,22 +629,20 @@ app.post('/api/connections/:integrationId/logout', checkService, async (req, res
     }
 });
 
-// Start server
-const server = app.listen(PORT, () => {
-    console.log(`API server running on port ${PORT}`);
-    console.log(`- Check status: GET http://localhost:${PORT}/api/status`);
-    console.log(`- Get connections: GET http://localhost:${PORT}/api/connections`);
-    console.log(`- Send message: POST http://localhost:${PORT}/api/send-message`);
-    console.log(`- Send image: POST http://localhost:${PORT}/api/send-image`);
+// Configuración de Swagger
+const swaggerDocs = swaggerJsDoc(swaggerOptions);
+app.use('/api-docs', swaggerUi.serve, swaggerUi.setup(swaggerDocs));
+
+// Handle uncaught exceptions
+process.on('uncaughtException', (error) => {
+    logger.fatal(error, 'Uncaught Exception');
+    process.exit(1);
 });
 
-// Handle server shutdown
-process.on('SIGINT', () => {
-    console.log('Shutting down server...');
-    server.close(() => {
-        console.log('Server shut down.');
-        process.exit(0);
-    });
+// Handle unhandled promise rejections
+process.on('unhandledRejection', (reason, promise) => {
+    logger.fatal({ reason, promise }, 'Unhandled Promise Rejection');
+    process.exit(1);
 });
 
 module.exports = { app, whatsappService }; 

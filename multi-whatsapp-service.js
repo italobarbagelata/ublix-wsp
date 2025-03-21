@@ -23,18 +23,31 @@ if (!fs.existsSync(BASE_SESSION_DIR)) {
     fs.mkdirSync(BASE_SESSION_DIR, { recursive: true });
 }
 
+// Configuración del logger
+const logger = pino({
+    level: process.env.NODE_ENV === 'production' ? 'info' : 'debug',
+    transport: {
+        target: 'pino-pretty',
+        options: {
+            colorize: true,
+            translateTime: 'SYS:standard',
+            ignore: 'pid,hostname'
+        }
+    }
+});
+
 // Class to manage multiple WhatsApp connections
 class MultiWhatsAppService {
     constructor() {
         this.connections = new Map(); // Map to store active connections
-        this.logger = pino({ level: 'error' });
+        this.qrCodes = new Map(); // Map to store QR codes
         this.supabase = supabase; // Expose supabase instance
     }
 
     // Initialize connections from Supabase
     async initialize() {
         try {
-            console.log('Initializing WhatsApp connections from database...');
+            logger.info('Initializing WhatsApp connections from database...');
             
             // Fetch all active integrations from Supabase
             const { data, error } = await supabase
@@ -46,7 +59,7 @@ class MultiWhatsAppService {
                 throw new Error(`Failed to fetch WhatsApp integrations: ${error.message}`);
             }
             
-            console.log(`Found ${data.length} active WhatsApp integrations`);
+            logger.info(`Found ${data.length} active WhatsApp integrations`);
             
             // Initialize each connection
             for (const integration of data) {
@@ -58,7 +71,7 @@ class MultiWhatsAppService {
             
             return true;
         } catch (error) {
-            console.error('Error initializing WhatsApp service:', error);
+            logger.error({ err: error }, 'Error initializing WhatsApp service');
             return false;
         }
     }
@@ -105,7 +118,7 @@ class MultiWhatsAppService {
     // Create a single WhatsApp connection
     async createConnection(integration) {
         const { id, phone_number_id } = integration;
-        console.log(`Setting up WhatsApp connection for ${phone_number_id} (${id})`);
+        logger.info({ integrationId: id, phoneNumberId: phone_number_id }, 'Setting up WhatsApp connection');
         
         // Create session directory for this specific connection
         const sessionDir = path.join(BASE_SESSION_DIR, id.toString());
@@ -123,7 +136,7 @@ class MultiWhatsAppService {
                 printQRInTerminal: false, // Disable printing QR in terminal automatically
                 markOnlineOnConnect: false,
                 defaultQueryTimeoutMs: 60000,
-                logger: this.logger
+                logger: pino({ level: 'silent' })
             });
             
             // Save credentials when updated
@@ -139,7 +152,7 @@ class MultiWhatsAppService {
                     await this.updateIntegrationStatus(id, 'awaiting_qr_scan', qr);
                     
                     // Log availability but don't generate
-                    console.log(`QR Code ready for ${phone_number_id} (${id}) at /api/connections/${id}/qr`);
+                    logger.info({ integrationId: id, phoneNumberId: phone_number_id }, 'QR Code ready');
                 }
                 
                 // Handle connection close
@@ -149,26 +162,35 @@ class MultiWhatsAppService {
                         lastDisconnect.error.output?.statusCode !== DisconnectReason.loggedOut
                     );
                     
-                    console.log(`Connection closed for ${phone_number_id} (${id}) due to:`, 
-                        lastDisconnect.error?.output?.payload?.message || 'Unknown error');
+                    logger.warn(
+                        { 
+                            integrationId: id, 
+                            phoneNumberId: phone_number_id,
+                            error: lastDisconnect.error?.output?.payload?.message || 'Unknown error'
+                        }, 
+                        'Connection closed'
+                    );
                     
                     if (shouldReconnect) {
-                        console.log(`Reconnecting ${phone_number_id} (${id})...`);
+                        logger.info({ integrationId: id, phoneNumberId: phone_number_id }, 'Reconnecting');
                         await this.updateIntegrationStatus(id, 'reconnecting');
                         // Recreate connection
                         setTimeout(() => this.createConnection(integration), 5000);
                     } else {
-                        console.log(`Connection closed for ${phone_number_id} (${id}). Not reconnecting.`);
+                        logger.info({ integrationId: id, phoneNumberId: phone_number_id }, 'Connection closed permanently');
                         await this.updateIntegrationStatus(id, 'disconnected');
                         
                         // If logged out, delete auth session
                         if (lastDisconnect.error?.output?.statusCode === DisconnectReason.loggedOut) {
-                            console.log(`Logged out ${phone_number_id} (${id}). Deleting session files...`);
+                            logger.info({ integrationId: id, phoneNumberId: phone_number_id }, 'Deleting session files');
                             try {
                                 fs.rmSync(sessionDir, { recursive: true, force: true });
-                                console.log(`Session files deleted for ${phone_number_id} (${id}).`);
+                                logger.info({ integrationId: id, phoneNumberId: phone_number_id }, 'Session files deleted');
                             } catch (error) {
-                                console.error(`Error deleting session files for ${phone_number_id} (${id}):`, error);
+                                logger.error(
+                                    { err: error, integrationId: id, phoneNumberId: phone_number_id },
+                                    'Error deleting session files'
+                                );
                             }
                         }
                         
@@ -179,7 +201,7 @@ class MultiWhatsAppService {
                 
                 // Handle successful connection
                 if (connection === 'open') {
-                    console.log(`Connected to WhatsApp for ${phone_number_id} (${id})!`);
+                    logger.info({ integrationId: id, phoneNumberId: phone_number_id }, 'Connected to WhatsApp');
                     await this.updateIntegrationStatus(id, 'connected');
                 }
             });
@@ -203,7 +225,15 @@ class MultiWhatsAppService {
                         // Get sender information
                         const senderJid = msg.key.remoteJid;
                         
-                        console.log(`New message for ${phone_number_id} (${id}) from ${senderJid}: ${messageContent}`);
+                        logger.info(
+                            { 
+                                integrationId: id, 
+                                phoneNumberId: phone_number_id,
+                                sender: senderJid,
+                                message: messageContent
+                            },
+                            'New message received'
+                        );
                         
                         // Process message - You can add your chatbot logic here
                         this.processIncomingMessage(id, integration, msg);
@@ -234,7 +264,10 @@ class MultiWhatsAppService {
             
             return sock;
         } catch (error) {
-            console.error(`Error in WhatsApp connection for ${phone_number_id} (${id}):`, error);
+            logger.error(
+                { err: error, integrationId: id, phoneNumberId: phone_number_id },
+                'Error in WhatsApp connection'
+            );
             await this.updateIntegrationStatus(id, 'error', error.message);
             return null;
         }
@@ -263,14 +296,14 @@ class MultiWhatsAppService {
                     .eq('id', integrationId);
                 
                 if (error) {
-                    console.error(`Error updating integration status in database for ${integrationId}:`, error);
+                    logger.error(`Error updating integration status in database for ${integrationId}:`, error);
                 }
                 // else {
                 //     console.log(`Updated integration status for ${integrationId} to ${status}`);
                 // }
             }
         } catch (error) {
-            console.error(`Error updating integration status for ${integrationId}:`, error);
+            logger.error(`Error updating integration status for ${integrationId}:`, error);
         }
     }
     
@@ -286,7 +319,7 @@ class MultiWhatsAppService {
         // If there is a QR code, display it in the console when specifically requested
         if (qrCode) {
             const integration = connection.integration;
-            console.log(`\nDisplaying QR Code for ${integration.phone_number_id} (${integrationId}):`);
+            logger.info(`\nDisplaying QR Code for ${integration.phone_number_id} (${integrationId}):`);
             qrcode.generate(qrCode, { small: true });
         }
         
@@ -306,13 +339,13 @@ class MultiWhatsAppService {
             // Request new QR code by forcing a reconnection
             if (sock) {
                 sock.ev.emit('connection.update', { qr: null });
-                console.log(`Requested new QR code for integration ${integrationId}`);
+                logger.info(`Requested new QR code for integration ${integrationId}`);
                 return true;
             }
             
             return false;
         } catch (error) {
-            console.error(`Error generating QR for ${integrationId}:`, error);
+            logger.error(`Error generating QR for ${integrationId}:`, error);
             return false;
         }
     }
@@ -358,7 +391,7 @@ class MultiWhatsAppService {
         }
         
         const connection = this.connections.get(integrationId);
-        console.log(`Removing WhatsApp connection for ${connection.integration.phone_number_id} (${integrationId})`);
+        logger.info(`Removing WhatsApp connection for ${connection.integration.phone_number_id} (${integrationId})`);
         
         try {
             // Close the socket properly if possible
@@ -373,7 +406,7 @@ class MultiWhatsAppService {
             
             return true;
         } catch (error) {
-            console.error(`Error removing connection for ${integrationId}:`, error);
+            logger.error(`Error removing connection for ${integrationId}:`, error);
             return false;
         }
     }
@@ -389,7 +422,7 @@ class MultiWhatsAppService {
         try {
             return await connection.sock.sendSimpleText(jid, text);
         } catch (error) {
-            console.error(`Error sending message for ${integrationId}:`, error);
+            logger.error(`Error sending message for ${integrationId}:`, error);
             throw error;
         }
     }
@@ -405,7 +438,7 @@ class MultiWhatsAppService {
         try {
             return await connection.sock.sendImage(jid, imagePath, caption);
         } catch (error) {
-            console.error(`Error sending image for ${integrationId}:`, error);
+            logger.error(`Error sending image for ${integrationId}:`, error);
             throw error;
         }
     }
