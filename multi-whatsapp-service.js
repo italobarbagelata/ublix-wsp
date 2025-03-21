@@ -36,6 +36,9 @@ const logger = pino({
     }
 });
 
+logger.info(`BASE_SESSION_DIR: ${BASE_SESSION_DIR}`);
+logger.info(`Directory exists: ${fs.existsSync(BASE_SESSION_DIR)}`);
+
 // Class to manage multiple WhatsApp connections
 class MultiWhatsAppService {
     constructor() {
@@ -127,9 +130,11 @@ class MultiWhatsAppService {
             try {
                 // Create session directory for this specific connection
                 const sessionDir = path.join(BASE_SESSION_DIR, id.toString());
+                logger.info(`Creating session directory: ${sessionDir}`);
                 if (!fs.existsSync(sessionDir)) {
                     fs.mkdirSync(sessionDir, { recursive: true });
                 }
+                logger.info(`Session directory created successfully: ${sessionDir}`);
                 
                 // Initialize auth state from the session directory
                 const { state, saveCreds } = await useMultiFileAuthState(sessionDir);
