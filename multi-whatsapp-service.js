@@ -141,6 +141,8 @@ class MultiWhatsAppService {
                 
                 logger.info({ integrationId: id }, 'Auth state initialized');
                 
+                global.crypto = require('crypto');
+                
                 // Create WhatsApp connection
                 const sock = makeWASocket({
                     auth: state,
