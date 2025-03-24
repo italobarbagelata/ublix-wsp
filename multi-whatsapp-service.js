@@ -285,12 +285,33 @@ class MultiWhatsAppService {
                 // Handle incoming messages
                 sock.ev.on('messages.upsert', async (m) => {
                     if (m.type === 'notify') {
+                        logger.info({
+                            integrationId: id,
+                            messageCount: m.messages.length,
+                            messageType: m.type
+                        }, "Received messages.upsert event");
+                        
                         for (const msg of m.messages) {
                             try {
+                                // Log message structure for debugging
+                                logger.info({
+                                    integrationId: id,
+                                    messageStructure: {
+                                        hasMessage: !!msg.message,
+                                        fromMe: msg.key?.fromMe,
+                                        remoteJid: msg.key?.remoteJid,
+                                        messageTypes: msg.message ? Object.keys(msg.message) : []
+                                    }
+                                }, "Message structure debug");
+                                
                                 // Skip processing if this is a receipt, status update, or if the message is from ourselves
                                 if (msg.key.fromMe || 
                                     msg.key.remoteJid === 'status@broadcast' ||
                                     !msg.message) {
+                                    logger.debug({
+                                        reason: msg.key.fromMe ? 'fromMe' : (msg.key.remoteJid === 'status@broadcast' ? 'broadcast' : 'no message'),
+                                        integrationId: id
+                                    }, 'Skipping message processing');
                                     continue;
                                 }
                                 
@@ -461,6 +482,14 @@ class MultiWhatsAppService {
     async processIncomingMessage(integrationId, integration, message) {
         const senderJid = message.key.remoteJid;
         
+        // Inicial debug log
+        logger.info({
+            integrationId,
+            senderJid,
+            hasMessageObj: !!message.message,
+            messageKeyId: message.key?.id
+        }, 'Iniciando procesamiento de mensaje');
+        
         // Verificar si es un mensaje válido
         if (!message || !message.message) {
             logger.debug({ integrationId, senderJid }, 'Mensaje vacío recibido, ignorando');
@@ -478,6 +507,15 @@ class MultiWhatsAppService {
             logger.debug({ integrationId, senderJid }, 'Mensaje del sistema recibido, ignorando');
             return;
         }
+        
+        // Debug log de tipos de mensaje disponibles
+        logger.info({
+            integrationId,
+            messageTypes: Object.keys(message.message),
+            hasConversation: !!message.message?.conversation,
+            hasExtendedText: !!message.message?.extendedTextMessage,
+            hasImage: !!message.message?.imageMessage
+        }, 'Tipos de mensaje disponibles');
         
         // Extraer el contenido del mensaje de diferentes tipos posibles
         const messageContent = message.message?.conversation || 
@@ -527,6 +565,14 @@ class MultiWhatsAppService {
         }, 'Nuevo mensaje válido recibido');
         
         try {
+            // Log before API call
+            logger.info({
+                integrationId,
+                senderJid,
+                message: messageContent,
+                projectId: integration.project_id
+            }, 'Realizando llamada a API de Ublix');
+            
             // Call the Ublix Chat API
             const response = await fetch('https://ublix-api-bagfa9hdh8hqhxcb.eastus-01.azurewebsites.net/api/chat/message', {
                 method: 'POST',
@@ -540,13 +586,34 @@ class MultiWhatsAppService {
                 })
             });
 
+            // Log API response status
+            logger.info({
+                integrationId,
+                apiStatus: response.status,
+                apiStatusText: response.statusText
+            }, 'Respuesta recibida de API de Ublix');
+
             if (!response.ok) {
                 throw new Error(`Chat API error: ${response.statusText}`);
             }
 
             const data = await response.json();
             
+            // Log response data
+            logger.info({
+                integrationId,
+                hasResponse: !!data.response,
+                responseLength: data.response ? data.response.length : 0,
+                messageId: data.message_id
+            }, 'Procesando respuesta de API');
+            
             // Send the response back to WhatsApp
+            logger.info({
+                integrationId,
+                senderJid,
+                responsePreview: data.response ? data.response.substring(0, 50) + '...' : 'Sin respuesta',
+            }, 'Enviando respuesta a WhatsApp');
+            
             await this.sendMessage(integrationId, senderJid, data.response);
             
             // Log the interaction
@@ -562,15 +629,28 @@ class MultiWhatsAppService {
                 err: error,
                 integrationId,
                 sender: senderJid,
-                message: messageContent
+                message: messageContent,
+                errorName: error.name,
+                errorMessage: error.message,
+                errorStack: error.stack
             }, 'Error processing message');
             
-            // Send an error message to the user
-            await this.sendMessage(
-                integrationId, 
-                senderJid, 
-                'Lo siento, hubo un error procesando tu mensaje. Por favor, intenta de nuevo más tarde.'
-            );
+            // Intentar enviar un mensaje de error al usuario
+            try {
+                logger.info({ integrationId, senderJid }, 'Intentando enviar mensaje de error al usuario');
+                await this.sendMessage(
+                    integrationId, 
+                    senderJid, 
+                    'Lo siento, hubo un error procesando tu mensaje. Por favor, intenta de nuevo más tarde.'
+                );
+                logger.info({ integrationId, senderJid }, 'Mensaje de error enviado correctamente');
+            } catch (sendError) {
+                logger.error({
+                    err: sendError,
+                    integrationId,
+                    senderJid
+                }, 'Error al enviar mensaje de error al usuario');
+            }
         }
     }
     
@@ -603,16 +683,56 @@ class MultiWhatsAppService {
     
     // Send a message using a specific connection
     async sendMessage(integrationId, jid, text) {
+        logger.info({
+            integrationId,
+            jid,
+            hasText: !!text,
+            textLength: text ? text.length : 0
+        }, 'Iniciando envío de mensaje');
+        
         if (!this.connections.has(integrationId)) {
+            logger.error({
+                integrationId,
+                availableConnections: Array.from(this.connections.keys())
+            }, 'No se encontró la conexión para el integrationId proporcionado');
             throw new Error(`No active connection found for integration ID: ${integrationId}`);
         }
         
         const connection = this.connections.get(integrationId);
+        logger.info({
+            integrationId,
+            connectionStatus: connection.status,
+            hasSocket: !!connection.sock,
+            hasSimpleText: !!(connection.sock && connection.sock.sendSimpleText)
+        }, 'Estado de la conexión para envío');
+        
+        if (!connection.sock) {
+            logger.error({ integrationId }, 'Socket no disponible para enviar mensaje');
+            throw new Error(`Socket no disponible para integration ID: ${integrationId}`);
+        }
+        
+        if (!connection.sock.sendSimpleText) {
+            logger.error({ integrationId }, 'Método sendSimpleText no disponible en el socket');
+            throw new Error(`El método sendSimpleText no está disponible en el socket para integration ID: ${integrationId}`);
+        }
         
         try {
-            return await connection.sock.sendSimpleText(jid, text);
+            logger.info({ integrationId, jid }, 'Enviando mensaje a WhatsApp');
+            const result = await connection.sock.sendSimpleText(jid, text);
+            logger.info({ 
+                integrationId, 
+                jid,
+                result: result ? JSON.stringify(result).substring(0, 100) : 'Sin resultado'
+            }, 'Mensaje enviado exitosamente');
+            return result;
         } catch (error) {
-            logger.error(`Error sending message for ${integrationId}:`, error);
+            logger.error({
+                err: error,
+                integrationId,
+                jid,
+                errorName: error.name,
+                errorMessage: error.message
+            }, 'Error enviando mensaje');
             throw error;
         }
     }
