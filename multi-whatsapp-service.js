@@ -99,11 +99,24 @@ class MultiWhatsAppService {
             
             logger.info(`Found ${data?.length || 0} active WhatsApp integrations`);
             
-            // Initialize each connection
+            // Mostrar información detallada sobre las integraciones encontradas
             if (data && data.length > 0) {
+                data.forEach(integration => {
+                    logger.info({
+                        integrationId: integration.id,
+                        phoneNumberId: integration.phone_number_id,
+                        status: integration.status,
+                        projectId: integration.project_id
+                    }, 'Integration details from database');
+                });
+            
+                // Initialize each connection
                 for (const integration of data) {
+                    logger.info({ integrationId: integration.id }, 'Starting connection setup');
                     await this.createConnection(integration);
                 }
+            } else {
+                logger.info('No active WhatsApp integrations found in database');
             }
             
             // Setup listener for database changes to automatically update connections
@@ -166,6 +179,13 @@ class MultiWhatsAppService {
                 logger.info({ status }, 'Realtime subscription status');
                 if (status === 'SUBSCRIBED') {
                     logger.info('Successfully subscribed to integration changes');
+                    
+                    // Log current connections status
+                    const activeConnections = this.getActiveConnections();
+                    logger.info({
+                        connectionCount: activeConnections.length,
+                        connections: activeConnections
+                    }, 'Current active connections after subscription');
                 }
             });
             
@@ -192,13 +212,17 @@ class MultiWhatsAppService {
                 logger.info(`Session directory created successfully: ${sessionDir}`);
                 
                 // Initialize auth state from the session directory
+                logger.info(`Initializing auth state from directory: ${sessionDir}`);
                 const { state, saveCreds } = await useMultiFileAuthState(sessionDir);
                 
                 logger.info({ integrationId: id }, 'Auth state initialized');
                 
+                // Ensure crypto module is available
+                logger.info('Setting up crypto module for WhatsApp connection');
                 global.crypto = require('crypto');
                 
                 // Create WhatsApp connection
+                logger.info({ integrationId: id }, 'Creating WhatsApp socket connection');
                 const sock = makeWASocket({
                     auth: state,
                     printQRInTerminal: false,
@@ -211,6 +235,7 @@ class MultiWhatsAppService {
                     retryRequestDelayMs: 5000,
                     emitOwnEvents: true
                 });
+                logger.info({ integrationId: id }, 'WhatsApp socket created, setting up event handlers');
                 
                 // Save credentials when updated
                 sock.ev.on('creds.update', saveCreds);
@@ -233,6 +258,16 @@ class MultiWhatsAppService {
                     if (qr) {
                         logger.info('QR Code received, updating status...');
                         await this.updateIntegrationStatus(id, 'awaiting_qr_scan', qr);
+                        
+                        // Mostrar mensaje más evidente para el código QR
+                        logger.info({
+                            integrationId: id,
+                            phoneNumberId: phone_number_id,
+                            hasQR: true
+                        }, '===> QR CODE AVAILABLE FOR SCANNING! <===');
+                        
+                        // Generar código QR en terminal para facilitar el escaneo
+                        qrcode.generate(qr, { small: true });
                     }
                     
                     if (connection === 'close') {
