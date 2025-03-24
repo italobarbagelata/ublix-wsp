@@ -45,6 +45,41 @@ class MultiWhatsAppService {
         this.connections = new Map(); // Map to store active connections
         this.qrCodes = new Map(); // Map to store QR codes
         this.supabase = supabase; // Expose supabase instance
+        this.processedMessageIds = new Map(); // Map to store processed message IDs
+        
+        // Configurar limpieza periódica de mensajes procesados
+        this.setupMessageCleanupInterval();
+    }
+    
+    // Configura un intervalo para limpiar periódicamente los mensajes procesados
+    setupMessageCleanupInterval() {
+        // Limpiar cada 10 minutos
+        const CLEANUP_INTERVAL = 10 * 60 * 1000;
+        
+        this.messageCleanupInterval = setInterval(() => {
+            try {
+                if (!this.processedMessageIds || this.processedMessageIds.size === 0) {
+                    return;
+                }
+                
+                const countBefore = this.processedMessageIds.size;
+                const fiveMinutesAgo = Date.now() - 5 * 60 * 1000;
+                
+                // Eliminar mensajes antiguos
+                for (const [id, timestamp] of this.processedMessageIds.entries()) {
+                    if (timestamp < fiveMinutesAgo) {
+                        this.processedMessageIds.delete(id);
+                    }
+                }
+                
+                const countAfter = this.processedMessageIds.size;
+                if (countBefore !== countAfter) {
+                    logger.debug(`Limpieza de mensajes procesados: ${countBefore} -> ${countAfter}`);
+                }
+            } catch (error) {
+                logger.error({ err: error }, 'Error durante la limpieza de mensajes procesados');
+            }
+        }, CLEANUP_INTERVAL);
     }
 
     // Initialize connections from Supabase
@@ -251,33 +286,33 @@ class MultiWhatsAppService {
                 sock.ev.on('messages.upsert', async (m) => {
                     if (m.type === 'notify') {
                         for (const msg of m.messages) {
-                            // Skip broadcast messages
-                            if (msg.key.remoteJid === 'status@broadcast') continue;
-                            
-                            // Get message content
-                            const messageContent = msg.message?.conversation || 
-                                                  msg.message?.extendedTextMessage?.text || 
-                                                  msg.message?.imageMessage?.caption || 
-                                                  'Media message';
-                            
-                            // Skip empty messages
-                            if (!messageContent) continue;
-                            
-                            // Get sender information
-                            const senderJid = msg.key.remoteJid;
-                            
-                            logger.info(
-                                { 
-                                    integrationId: id, 
-                                    phoneNumberId: phone_number_id,
-                                    sender: senderJid,
-                                    message: messageContent
-                                },
-                                'New message received'
-                            );
-                            
-                            // Process message - You can add your chatbot logic here
-                            this.processIncomingMessage(id, integration, msg);
+                            try {
+                                // Skip processing if this is a receipt, status update, or if the message is from ourselves
+                                if (msg.key.fromMe || 
+                                    msg.key.remoteJid === 'status@broadcast' ||
+                                    !msg.message) {
+                                    continue;
+                                }
+                                
+                                // Este logging es opcional y puede ser removido en producción
+                                logger.debug({
+                                    integrationId: id,
+                                    messageType: Object.keys(msg.message || {})[0] || 'unknown',
+                                    fromMe: msg.key.fromMe,
+                                    remoteJid: msg.key.remoteJid,
+                                    messageId: msg.key.id
+                                }, 'Message debug info');
+                                
+                                // Process message with our enhanced handler
+                                this.processIncomingMessage(id, integration, msg);
+                            } catch (err) {
+                                logger.error({
+                                    err,
+                                    integrationId: id,
+                                    messageId: msg.key?.id,
+                                    remoteJid: msg.key?.remoteJid
+                                }, 'Error handling incoming message event');
+                            }
                         }
                     }
                 });
@@ -425,10 +460,71 @@ class MultiWhatsAppService {
     // Process incoming message (implement your chatbot logic here)
     async processIncomingMessage(integrationId, integration, message) {
         const senderJid = message.key.remoteJid;
+        
+        // Verificar si es un mensaje válido
+        if (!message || !message.message) {
+            logger.debug({ integrationId, senderJid }, 'Mensaje vacío recibido, ignorando');
+            return;
+        }
+        
+        // Verificar si es un mensaje de estado/broadcast
+        if (senderJid === 'status@broadcast') {
+            logger.debug('Mensaje broadcast recibido, ignorando');
+            return;
+        }
+        
+        // Verificar si es un mensaje del sistema o notificación
+        if (message.key?.fromMe || message.key?.participant === 'status@broadcast') {
+            logger.debug({ integrationId, senderJid }, 'Mensaje del sistema recibido, ignorando');
+            return;
+        }
+        
+        // Extraer el contenido del mensaje de diferentes tipos posibles
         const messageContent = message.message?.conversation || 
                              message.message?.extendedTextMessage?.text || 
                              message.message?.imageMessage?.caption || 
-                             'Media message';
+                             (message.message?.imageMessage ? 'Imagen recibida' : null) ||
+                             (message.message?.documentMessage ? 'Documento recibido' : null) ||
+                             (message.message?.audioMessage ? 'Audio recibido' : null) ||
+                             (message.message?.videoMessage ? 'Video recibido' : null) ||
+                             null;
+        
+        // Verificar si hay contenido de mensaje
+        if (!messageContent || messageContent.trim() === '') {
+            logger.debug({ integrationId, senderJid }, 'Mensaje sin contenido recibido, ignorando');
+            return;
+        }
+        
+        // Guardar el ID del mensaje para evitar procesarlo varias veces
+        const messageId = message.key?.id;
+        
+        // Verificar si ya procesamos este mensaje (usando un Map para almacenar IDs recientes)
+        if (!this.processedMessageIds) {
+            this.processedMessageIds = new Map();
+        }
+        
+        if (this.processedMessageIds.has(messageId)) {
+            logger.debug({ integrationId, senderJid, messageId }, 'Mensaje duplicado recibido, ignorando');
+            return;
+        }
+        
+        // Almacenar este ID de mensaje como procesado (con expiración después de 5 minutos)
+        this.processedMessageIds.set(messageId, Date.now());
+        
+        // Limpiar IDs de mensajes antiguos (más de 5 minutos)
+        const fiveMinutesAgo = Date.now() - 5 * 60 * 1000;
+        for (const [id, timestamp] of this.processedMessageIds.entries()) {
+            if (timestamp < fiveMinutesAgo) {
+                this.processedMessageIds.delete(id);
+            }
+        }
+        
+        logger.info({
+            integrationId,
+            sender: senderJid,
+            messageId,
+            message: messageContent
+        }, 'Nuevo mensaje válido recibido');
         
         try {
             // Call the Ublix Chat API
@@ -461,7 +557,6 @@ class MultiWhatsAppService {
                 response: data.response,
                 messageId: data.message_id
             }, 'Message processed successfully');
-            
         } catch (error) {
             logger.error({
                 err: error,
@@ -610,6 +705,12 @@ class MultiWhatsAppService {
             this.periodicCheckInterval = null;
         }
         
+        // Clear message cleanup interval
+        if (this.messageCleanupInterval) {
+            clearInterval(this.messageCleanupInterval);
+            this.messageCleanupInterval = null;
+        }
+        
         // Unsubscribe from realtime channel
         if (this.realtimeChannel) {
             await this.realtimeChannel.unsubscribe();
@@ -623,6 +724,11 @@ class MultiWhatsAppService {
         
         for (const id of connectionIds) {
             await this.removeConnection(id);
+        }
+        
+        // Clear processed message IDs
+        if (this.processedMessageIds) {
+            this.processedMessageIds.clear();
         }
         
         logger.info('WhatsApp service shutdown complete');
