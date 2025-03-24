@@ -62,15 +62,20 @@ class MultiWhatsAppService {
                 throw new Error(`Failed to fetch WhatsApp integrations: ${error.message}`);
             }
             
-            logger.info(`Found ${data.length} active WhatsApp integrations`);
+            logger.info(`Found ${data?.length || 0} active WhatsApp integrations`);
             
             // Initialize each connection
-            for (const integration of data) {
-                await this.createConnection(integration);
+            if (data && data.length > 0) {
+                for (const integration of data) {
+                    await this.createConnection(integration);
+                }
             }
             
             // Setup listener for database changes to automatically update connections
             this.setupDatabaseListener();
+            
+            // Set up periodic check for new integrations - as a backup in case realtime fails
+            this.startPeriodicIntegrationCheck();
             
             return true;
         } catch (error) {
@@ -81,6 +86,8 @@ class MultiWhatsAppService {
     
     // Setup realtime subscription to the integrations table
     setupDatabaseListener() {
+        logger.info('Setting up database listener for integration changes');
+        
         const channel = supabase
             .channel('integration_changes')
             .on(
@@ -91,31 +98,44 @@ class MultiWhatsAppService {
                     table: 'integration_whatsapp_business'
                 },
                 async (payload) => {
-                    const integration = payload.new;
+                    logger.info({ eventType: payload.eventType, integrationId: payload.new?.id || payload.old?.id }, 'Integration change detected');
                     
                     // Handle record updates
                     if (payload.eventType === 'UPDATE') {
+                        const integration = payload.new;
                         if (integration.active && !this.connections.has(integration.id)) {
                             // New active connection
+                            logger.info({ integrationId: integration.id }, 'Activating new connection');
                             await this.createConnection(integration);
                         } else if (!integration.active && this.connections.has(integration.id)) {
                             // Connection deactivated
+                            logger.info({ integrationId: integration.id }, 'Deactivating connection');
                             await this.removeConnection(integration.id);
                         }
                     }
                     
                     // Handle new records
-                    if (payload.eventType === 'INSERT' && integration.active) {
-                        await this.createConnection(integration);
+                    if (payload.eventType === 'INSERT' && payload.new.active) {
+                        logger.info({ integrationId: payload.new.id }, 'New integration created, setting up connection');
+                        await this.createConnection(payload.new);
                     }
                     
                     // Handle deleted records
                     if (payload.eventType === 'DELETE' && this.connections.has(payload.old.id)) {
+                        logger.info({ integrationId: payload.old.id }, 'Integration deleted, removing connection');
                         await this.removeConnection(payload.old.id);
                     }
                 }
             )
-            .subscribe();
+            .subscribe((status) => {
+                logger.info({ status }, 'Realtime subscription status');
+                if (status === 'SUBSCRIBED') {
+                    logger.info('Successfully subscribed to integration changes');
+                }
+            });
+            
+        // Store channel reference to prevent garbage collection
+        this.realtimeChannel = channel;
     }
     
     // Create a single WhatsApp connection
@@ -526,6 +546,86 @@ class MultiWhatsAppService {
             status: conn.status,
             projectId: conn.integration.project_id
         }));
+    }
+    
+    // Periodic check for new integrations as a backup mechanism
+    startPeriodicIntegrationCheck() {
+        // Check every 5 minutes for changes
+        const CHECK_INTERVAL = 5 * 60 * 1000;
+        
+        this.periodicCheckInterval = setInterval(async () => {
+            try {
+                logger.info('Performing periodic integration check');
+                
+                // Get all active integrations from database
+                const { data, error } = await supabase
+                    .from('integration_whatsapp_business')
+                    .select('*')
+                    .eq('active', true);
+                    
+                if (error) {
+                    throw new Error(`Failed to fetch WhatsApp integrations: ${error.message}`);
+                }
+                
+                // Get current active integrations
+                const activeIntegrationIds = Array.from(this.connections.keys());
+                
+                // Identify new integrations to add
+                const newIntegrations = data.filter(integration => 
+                    !activeIntegrationIds.includes(integration.id));
+                
+                // Identify integrations to remove (no longer in the database or not active)
+                const dataIntegrationIds = data.map(integration => integration.id);
+                const integrationsToRemove = activeIntegrationIds.filter(id => 
+                    !dataIntegrationIds.includes(id));
+                
+                // Add new integrations
+                if (newIntegrations.length > 0) {
+                    logger.info(`Found ${newIntegrations.length} new integrations to add`);
+                    for (const integration of newIntegrations) {
+                        await this.createConnection(integration);
+                    }
+                }
+                
+                // Remove deleted/deactivated integrations
+                if (integrationsToRemove.length > 0) {
+                    logger.info(`Found ${integrationsToRemove.length} integrations to remove`);
+                    for (const id of integrationsToRemove) {
+                        await this.removeConnection(id);
+                    }
+                }
+            } catch (error) {
+                logger.error({ err: error }, 'Error in periodic integration check');
+            }
+        }, CHECK_INTERVAL);
+    }
+
+    // Stop the service and clean up resources
+    async shutdown() {
+        logger.info('Shutting down WhatsApp service...');
+        
+        // Clear periodic check interval
+        if (this.periodicCheckInterval) {
+            clearInterval(this.periodicCheckInterval);
+            this.periodicCheckInterval = null;
+        }
+        
+        // Unsubscribe from realtime channel
+        if (this.realtimeChannel) {
+            await this.realtimeChannel.unsubscribe();
+            logger.info('Unsubscribed from realtime channel');
+            this.realtimeChannel = null;
+        }
+        
+        // Close all active connections
+        const connectionIds = Array.from(this.connections.keys());
+        logger.info(`Closing ${connectionIds.length} active connections`);
+        
+        for (const id of connectionIds) {
+            await this.removeConnection(id);
+        }
+        
+        logger.info('WhatsApp service shutdown complete');
     }
 }
 
