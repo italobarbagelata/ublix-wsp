@@ -410,11 +410,53 @@ class MultiWhatsAppService {
                              message.message?.imageMessage?.caption || 
                              'Media message';
         
-        // TODO: Implement your chatbot logic here
-        // This is where you would connect to your Python backend or LangChain chatbot
-        
-        // For now, just echo the message back
-        await this.sendMessage(integrationId, senderJid, `Echo: ${messageContent}`);
+        try {
+            // Call the Ublix Chat API
+            const response = await fetch('https://ublix-api-bagfa9hdh8hqhxcb.eastus-01.azurewebsites.net/api/chat/message', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify({
+                    message: messageContent,
+                    project_id: integration.project_id,
+                    user_id: senderJid // Using WhatsApp JID as user_id
+                })
+            });
+
+            if (!response.ok) {
+                throw new Error(`Chat API error: ${response.statusText}`);
+            }
+
+            const data = await response.json();
+            
+            // Send the response back to WhatsApp
+            await this.sendMessage(integrationId, senderJid, data.response);
+            
+            // Log the interaction
+            logger.info({
+                integrationId,
+                sender: senderJid,
+                message: messageContent,
+                response: data.response,
+                messageId: data.message_id
+            }, 'Message processed successfully');
+            
+        } catch (error) {
+            logger.error({
+                err: error,
+                integrationId,
+                sender: senderJid,
+                message: messageContent
+            }, 'Error processing message');
+            
+            // Send an error message to the user
+            await this.sendMessage(
+                integrationId, 
+                senderJid, 
+                'Lo siento, hubo un error procesando tu mensaje. Por favor, intenta de nuevo más tarde.'
+            );
+        }
     }
     
     // Remove a connection
