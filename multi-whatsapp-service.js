@@ -305,14 +305,46 @@ class MultiWhatsAppService {
                                 }, "Message structure debug");
                                 
                                 // Skip processing if this is a receipt, status update, or if the message is from ourselves
-                                if (msg.key.fromMe || 
-                                    msg.key.remoteJid === 'status@broadcast' ||
+                                if (msg.key.remoteJid === 'status@broadcast' ||
                                     !msg.message) {
                                     logger.debug({
-                                        reason: msg.key.fromMe ? 'fromMe' : (msg.key.remoteJid === 'status@broadcast' ? 'broadcast' : 'no message'),
+                                        reason: msg.key.fromMe ? 'fromMe (ignorado temporalmente)' : (msg.key.remoteJid === 'status@broadcast' ? 'broadcast' : 'no message'),
                                         integrationId: id
                                     }, 'Skipping message processing');
                                     continue;
+                                }
+                                
+                                // Añadir verificación adicional para evitar bucles si el mensaje es nuestro
+                                if (msg.key.fromMe) {
+                                    logger.info({
+                                        integrationId: id,
+                                        fromMe: true,
+                                        remoteJid: msg.key.remoteJid
+                                    }, 'Procesando mensaje marcado como fromMe (diagnóstico)');
+                                    
+                                    // Verificar si es realmente una respuesta automática analizando el contenido del mensaje
+                                    const messageText = msg.message?.conversation || 
+                                                      msg.message?.extendedTextMessage?.text || 
+                                                      (msg.message?.imageMessage?.caption || '');
+                                    
+                                    // Si el mensaje contiene un patrón que indica que es una respuesta automática, ignorarlo
+                                    if (messageText.startsWith('Lo siento, hubo un error') || 
+                                        messageText.includes('procesando tu mensaje')) {
+                                        logger.info({
+                                            integrationId: id,
+                                            messagePreview: messageText.substring(0, 30)
+                                        }, 'Ignorando respuesta automática para evitar bucles');
+                                        continue;
+                                    }
+                                }
+                                
+                                // En caso de que sea un mensaje marcado como fromMe, registrarlo para diagnóstico
+                                if (msg.key?.fromMe) {
+                                    logger.info({ 
+                                        integrationId: id, 
+                                        senderJid: msg.key.remoteJid,
+                                        isFromMe: true
+                                    }, 'Procesando mensaje marcado como fromMe para diagnóstico');
                                 }
                                 
                                 // Este logging es opcional y puede ser removido en producción
@@ -502,10 +534,13 @@ class MultiWhatsAppService {
             return;
         }
         
-        // Verificar si es un mensaje del sistema o notificación
-        if (message.key?.fromMe || message.key?.participant === 'status@broadcast') {
-            logger.debug({ integrationId, senderJid }, 'Mensaje del sistema recibido, ignorando');
-            return;
+        // Si es fromMe, agregar log especial para diagnóstico
+        if (message.key?.fromMe) {
+            logger.info({ 
+                integrationId, 
+                senderJid,
+                isFromMe: true
+            }, 'Procesando mensaje marcado como fromMe para diagnóstico');
         }
         
         // Debug log de tipos de mensaje disponibles
@@ -530,6 +565,18 @@ class MultiWhatsAppService {
         // Verificar si hay contenido de mensaje
         if (!messageContent || messageContent.trim() === '') {
             logger.debug({ integrationId, senderJid }, 'Mensaje sin contenido recibido, ignorando');
+            return;
+        }
+        
+        // Si el mensaje es nuestro y contiene textos de respuesta automática, ignorarlo para evitar bucles
+        if (message.key?.fromMe && (
+            messageContent.startsWith('Lo siento, hubo un error') || 
+            messageContent.includes('procesando tu mensaje')
+        )) {
+            logger.info({
+                integrationId,
+                messagePreview: messageContent.substring(0, 50)
+            }, 'Ignorando respuesta automática para evitar bucles');
             return;
         }
         
