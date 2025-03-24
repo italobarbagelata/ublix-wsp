@@ -147,8 +147,8 @@ class MultiWhatsAppService {
                     printQRInTerminal: false,
                     markOnlineOnConnect: false,
                     defaultQueryTimeoutMs: 60000,
-                    logger: pino({ level: 'silent' }),
-                    browser: ['Ublix WSP', 'Chrome', '1.0.0'],
+                    logger: pino({ level: 'debug' }),
+                    browser: ['Ubuntu', 'Chrome', '10.0'],
                     connectTimeoutMs: 60000,
                     keepAliveIntervalMs: 30000,
                     retryRequestDelayMs: 5000,
@@ -162,37 +162,38 @@ class MultiWhatsAppService {
                 sock.ev.on('connection.update', async (update) => {
                     const { connection, lastDisconnect, qr } = update;
                     
-                    // Handle QR code - only store it, don't display
+                    // Agregar más logging
+                    logger.info({
+                        event: 'connection.update',
+                        update: {
+                            connection,
+                            hasQR: !!qr,
+                            disconnectReason: lastDisconnect?.error?.output?.payload?.message,
+                            statusCode: lastDisconnect?.error?.output?.statusCode
+                        }
+                    });
+                    
                     if (qr) {
-                        // Store QR code and update status, but don't generate it
+                        logger.info('QR Code received, updating status...');
                         await this.updateIntegrationStatus(id, 'awaiting_qr_scan', qr);
-                        
-                        // Log availability but don't generate
-                        logger.info({ integrationId: id, phoneNumberId: phone_number_id }, 'QR Code ready');
                     }
                     
-                    // Handle connection close
                     if (connection === 'close') {
+                        const statusCode = lastDisconnect?.error?.output?.statusCode;
                         const shouldReconnect = (
-                            lastDisconnect.error instanceof Boom && 
-                            lastDisconnect.error.output?.statusCode !== DisconnectReason.loggedOut
+                            lastDisconnect?.error instanceof Boom && 
+                            statusCode !== DisconnectReason.loggedOut
                         );
                         
-                        logger.warn(
-                            { 
-                                integrationId: id, 
-                                phoneNumberId: phone_number_id,
-                                error: lastDisconnect.error?.output?.payload?.message || 'Unknown error',
-                                statusCode: lastDisconnect.error?.output?.statusCode,
-                                fullError: JSON.stringify(lastDisconnect.error)
-                            }, 
-                            'Connection closed'
-                        );
+                        logger.info({
+                            message: 'Connection closed',
+                            statusCode,
+                            shouldReconnect,
+                            error: lastDisconnect?.error?.message || 'Unknown error'
+                        });
                         
                         if (shouldReconnect) {
-                            logger.info({ integrationId: id, phoneNumberId: phone_number_id }, 'Reconnecting');
-                            await this.updateIntegrationStatus(id, 'reconnecting');
-                            // Recreate connection
+                            logger.info('Attempting to reconnect in 5 seconds...');
                             setTimeout(() => this.createConnection(integration), 5000);
                         } else {
                             logger.info({ integrationId: id, phoneNumberId: phone_number_id }, 'Connection closed permanently');
