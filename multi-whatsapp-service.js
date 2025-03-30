@@ -621,7 +621,7 @@ class MultiWhatsAppService {
             }, 'Realizando llamada a API de Ublix');
             
             // Call the Ublix Chat API
-            const response = await fetch('https://wsp.ublix.app/api/chat/message', {
+            const response = await fetch('https://api.ublix.app/api/chat/message', {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json'
