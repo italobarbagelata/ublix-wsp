@@ -15,6 +15,8 @@ const SUPABASE_URL = process.env.SUPABASE_URL || '';
 const SUPABASE_KEY = process.env.SUPABASE_KEY || '';
 const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
 
+const CHAT_API_URL = process.env.CHAT_API_URL || '';
+
 // Base directory for all sessions
 const BASE_SESSION_DIR = process.env.BASE_SESSION_DIR || './whatsapp_sessions';
 
@@ -621,7 +623,7 @@ class MultiWhatsAppService {
             }, 'Realizando llamada a API de Ublix');
             
             // Call the Ublix Chat API
-            const response = await fetch('https://api.ublix.app/api/chat/message', {
+            const response = await fetch(CHAT_API_URL + '/api/chat/message', {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json'
