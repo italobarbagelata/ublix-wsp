@@ -6,7 +6,7 @@
     "start": "NODE_ENV=production node main.js | pino-pretty",
     "dev": "NODE_ENV=development node main.js | pino-pretty",
     "client": "node index.js",
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "test": "echo \"No hay tests configurados\" && exit 0"
   },
   "keywords": [
     "whatsapp",
