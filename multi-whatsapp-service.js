@@ -6,6 +6,7 @@ const path = require('path');
 const pino = require('pino');
 const { createClient } = require('@supabase/supabase-js');
 const dotenv = require('dotenv');
+const crypto = require('crypto');
 
 // Load environment variables
 dotenv.config();
@@ -17,26 +18,98 @@ const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
 
 const CHAT_API_URL = process.env.CHAT_API_URL || '';
 
-// Base directory for all sessions
-const BASE_SESSION_DIR = process.env.BASE_SESSION_DIR || './whatsapp_sessions';
-
-// Create base session directory if it doesn't exist
-if (!fs.existsSync(BASE_SESSION_DIR)) {
-    fs.mkdirSync(BASE_SESSION_DIR, { recursive: true });
-}
-
-// Configuración del logger
+// Configuración del logger mejorada para Azure
 const logger = pino({
     level: process.env.NODE_ENV === 'production' ? 'info' : 'debug',
+    base: {
+        service: 'whatsapp-service',
+        environment: process.env.NODE_ENV || 'development',
+        version: process.env.npm_package_version || '1.0.0'
+    },
+    formatters: {
+        level: (label) => {
+            return { level: label.toUpperCase() };
+        },
+        bindings: (bindings) => {
+            return {
+                pid: bindings.pid,
+                hostname: bindings.hostname,
+                service: bindings.service,
+                environment: bindings.environment,
+                version: bindings.version
+            };
+        }
+    },
+    timestamp: () => `,"timestamp":"${new Date().toISOString()}"`,
+    messageKey: 'message',
+    errorKey: 'error',
     transport: {
         target: 'pino-pretty',
         options: {
             colorize: true,
             translateTime: 'SYS:standard',
-            ignore: 'pid,hostname'
+            ignore: 'pid,hostname',
+            messageFormat: '{msg}',
+            errorLikeObjectKeys: ['err', 'error'],
+            errorProps: 'stack'
         }
     }
 });
+
+// Función de utilidad para logging estructurado
+const logWithContext = (level, message, context = {}) => {
+    const logContext = {
+        ...context,
+        timestamp: new Date().toISOString(),
+        service: 'whatsapp-service'
+    };
+    
+    switch (level.toLowerCase()) {
+        case 'error':
+            logger.error(logContext, message);
+            break;
+        case 'warn':
+            logger.warn(logContext, message);
+            break;
+        case 'info':
+            logger.info(logContext, message);
+            break;
+        case 'debug':
+            logger.debug(logContext, message);
+            break;
+        default:
+            logger.info(logContext, message);
+    }
+};
+
+// Configuración de directorio de sesiones
+const DEFAULT_SESSION_DIR = './whatsapp_sessions';
+const AZURE_SESSION_DIR = '/home/site/wwwroot/whatsapp_sessions';
+const BASE_SESSION_DIR = process.env.BASE_SESSION_DIR || 
+    (process.env.WEBSITE_SITE_NAME ? AZURE_SESSION_DIR : DEFAULT_SESSION_DIR);
+
+// Create base session directory if it doesn't exist
+if (!fs.existsSync(BASE_SESSION_DIR)) {
+    logWithContext('info', 'Creando directorio de sesiones', {
+        path: BASE_SESSION_DIR,
+        isAzure: process.env.WEBSITE_SITE_NAME ? true : false
+    });
+    fs.mkdirSync(BASE_SESSION_DIR, { recursive: true });
+}
+
+// Verificar permisos del directorio
+try {
+    fs.accessSync(BASE_SESSION_DIR, fs.constants.R_OK | fs.constants.W_OK);
+    logWithContext('info', 'Directorio de sesiones accesible', {
+        path: BASE_SESSION_DIR
+    });
+} catch (error) {
+    logWithContext('error', 'Error de permisos en directorio de sesiones', {
+        path: BASE_SESSION_DIR,
+        error: error.message
+    });
+    throw error;
+}
 
 logger.info(`BASE_SESSION_DIR: ${BASE_SESSION_DIR}`);
 logger.info(`Directory exists: ${fs.existsSync(BASE_SESSION_DIR)}`);
@@ -178,7 +251,10 @@ class MultiWhatsAppService {
     // Create a single WhatsApp connection
     async createConnection(integration) {
         const { id, phone_number_id } = integration;
-        logger.info({ integrationId: id, phoneNumberId: phone_number_id }, 'Setting up WhatsApp connection');
+        logWithContext('info', 'Iniciando creación de conexión WhatsApp', {
+            integrationId: id,
+            phoneNumberId: phone_number_id
+        });
         
         let retryCount = 0;
         const maxRetries = 3;
@@ -187,18 +263,21 @@ class MultiWhatsAppService {
             try {
                 // Create session directory for this specific connection
                 const sessionDir = path.join(BASE_SESSION_DIR, id.toString());
-                logger.info(`Creating session directory: ${sessionDir}`);
+                logWithContext('debug', 'Creando directorio de sesión', {
+                    integrationId: id,
+                    sessionDir
+                });
+                
                 if (!fs.existsSync(sessionDir)) {
                     fs.mkdirSync(sessionDir, { recursive: true });
                 }
-                logger.info(`Session directory created successfully: ${sessionDir}`);
                 
                 // Initialize auth state from the session directory
                 const { state, saveCreds } = await useMultiFileAuthState(sessionDir);
                 
-                logger.info({ integrationId: id }, 'Auth state initialized');
-                
-                global.crypto = require('crypto');
+                logWithContext('info', 'Estado de autenticación inicializado', {
+                    integrationId: id
+                });
                 
                 // Create WhatsApp connection
                 const sock = makeWASocket({
@@ -221,19 +300,18 @@ class MultiWhatsAppService {
                 sock.ev.on('connection.update', async (update) => {
                     const { connection, lastDisconnect, qr } = update;
                     
-                    // Agregar más logging
-                    logger.info({
-                        event: 'connection.update',
-                        update: {
-                            connection,
-                            hasQR: !!qr,
-                            disconnectReason: lastDisconnect?.error?.output?.payload?.message,
-                            statusCode: lastDisconnect?.error?.output?.statusCode
-                        }
+                    logWithContext('info', 'Actualización de conexión recibida', {
+                        integrationId: id,
+                        connection,
+                        hasQR: !!qr,
+                        disconnectReason: lastDisconnect?.error?.output?.payload?.message,
+                        statusCode: lastDisconnect?.error?.output?.statusCode
                     });
                     
                     if (qr) {
-                        logger.info('QR Code received, updating status...');
+                        logWithContext('info', 'Código QR recibido', {
+                            integrationId: id
+                        });
                         await this.updateIntegrationStatus(id, 'awaiting_qr_scan', qr);
                     }
                     
@@ -244,42 +322,50 @@ class MultiWhatsAppService {
                             statusCode !== DisconnectReason.loggedOut
                         );
                         
-                        logger.info({
-                            message: 'Connection closed',
+                        logWithContext('warn', 'Conexión cerrada', {
+                            integrationId: id,
                             statusCode,
                             shouldReconnect,
-                            error: lastDisconnect?.error?.message || 'Unknown error'
+                            error: lastDisconnect?.error?.message || 'Error desconocido'
                         });
                         
                         if (shouldReconnect) {
-                            logger.info('Attempting to reconnect in 5 seconds...');
+                            logWithContext('info', 'Intentando reconexión', {
+                                integrationId: id
+                            });
                             setTimeout(() => this.createConnection(integration), 5000);
                         } else {
-                            logger.info({ integrationId: id, phoneNumberId: phone_number_id }, 'Connection closed permanently');
+                            logWithContext('error', 'Conexión cerrada permanentemente', {
+                                integrationId: id,
+                                phoneNumberId: phone_number_id
+                            });
                             await this.updateIntegrationStatus(id, 'disconnected');
                             
-                            // If logged out, delete auth session
                             if (lastDisconnect.error?.output?.statusCode === DisconnectReason.loggedOut) {
-                                logger.info({ integrationId: id, phoneNumberId: phone_number_id }, 'Deleting session files');
+                                logWithContext('info', 'Eliminando archivos de sesión', {
+                                    integrationId: id,
+                                    phoneNumberId: phone_number_id
+                                });
                                 try {
                                     fs.rmSync(sessionDir, { recursive: true, force: true });
-                                    logger.info({ integrationId: id, phoneNumberId: phone_number_id }, 'Session files deleted');
                                 } catch (error) {
-                                    logger.error(
-                                        { err: error, integrationId: id, phoneNumberId: phone_number_id },
-                                        'Error deleting session files'
-                                    );
+                                    logWithContext('error', 'Error al eliminar archivos de sesión', {
+                                        err: error,
+                                        integrationId: id,
+                                        phoneNumberId: phone_number_id
+                                    });
                                 }
                             }
                             
-                            // Remove from active connections
                             this.connections.delete(id);
                         }
                     }
                     
-                    // Handle successful connection
                     if (connection === 'open') {
-                        logger.info({ integrationId: id, phoneNumberId: phone_number_id }, 'Connected to WhatsApp');
+                        logWithContext('info', 'Conectado a WhatsApp', {
+                            integrationId: id,
+                            phoneNumberId: phone_number_id
+                        });
                         await this.updateIntegrationStatus(id, 'connected');
                     }
                 });
