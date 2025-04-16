@@ -3,7 +3,7 @@
   "version": "1.0.0",
   "main": "main.js",
   "scripts": {
-    "start": "NODE_ENV=production node main.js | pino-pretty",
+    "start": "NODE_ENV=production node main.js",
     "dev": "NODE_ENV=development node main.js | pino-pretty",
     "client": "node index.js",
     "test": "echo \"No hay tests configurados\" && exit 0"
