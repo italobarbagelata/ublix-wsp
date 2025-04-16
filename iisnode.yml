@@ -1,0 +1,17 @@
+nodeProcessCommandLine: "node.exe"
+nodeEnv: production
+loggingEnabled: true
+logDirectory: iisnode
+maxLogFileSizeInKB: 128
+maxLogFiles: 20
+maxConcurrentRequestsPerProcess: 1024
+maxNamedPipeConnectionRetry: 100
+namedPipeConnectionRetryDelay: 250
+maxNamedPipeConnectionPoolSize: 512
+maxNamedPipePooledConnectionAge: 30000
+asyncCompletionThreadCount: 0
+initialRequestBufferSize: 4096
+maxRequestBufferSize: 65536
+uncFileChangesPollingInterval: 5000
+gracefulShutdownTimeout: 60000
+watchFiles: "*.js;*.json;*.env" 

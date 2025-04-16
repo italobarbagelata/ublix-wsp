@@ -11,14 +11,16 @@ const pino = require('pino');
 // Configuración del logger
 const logger = pino({
     level: process.env.NODE_ENV === 'production' ? 'info' : 'debug',
-    transport: {
-        target: 'pino-pretty',
-        options: {
-            colorize: true,
-            translateTime: 'SYS:standard',
-            ignore: 'pid,hostname'
+    ...(process.env.NODE_ENV !== 'production' ? {
+        transport: {
+            target: 'pino-pretty',
+            options: {
+                colorize: true,
+                translateTime: 'SYS:standard',
+                ignore: 'pid,hostname'
+            }
         }
-    }
+    } : {})
 });
 
 // Load environment variables
@@ -50,11 +52,24 @@ async function main() {
             logger.info(`Documentación de Swagger disponible en http://localhost:${PORT}/api-docs`);
         });
 
+        // Configuración de timeouts para Azure
+        server.setTimeout(120000); // 2 minutos de timeout
+        server.keepAliveTimeout = 65000; // 65 segundos de keep-alive
+
         // Handle server shutdown
         process.on('SIGINT', () => {
             logger.info('Shutting down server...');
             server.close(() => {
                 logger.info('Server shut down.');
+                process.exit(0);
+            });
+        });
+
+        // Manejo específico para Azure
+        process.on('SIGTERM', () => {
+            logger.info('Received SIGTERM signal from Azure...');
+            server.close(() => {
+                logger.info('Server shut down gracefully.');
                 process.exit(0);
             });
         });
