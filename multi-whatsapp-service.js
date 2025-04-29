@@ -250,97 +250,256 @@ class MultiWhatsAppService {
     
     // Create a single WhatsApp connection
     async createConnection(integration) {
-        const { id, phone_number, name } = integration;
-        const sessionDir = path.join(BASE_SESSION_DIR, id);
+        const { id, phone_number_id } = integration;
+        logWithContext('info', 'Iniciando creación de conexión WhatsApp', {
+            integrationId: id,
+            phoneNumberId: phone_number_id
+        });
         
-        if (!fs.existsSync(sessionDir)) {
-            fs.mkdirSync(sessionDir, { recursive: true });
-        }
-
+        let retryCount = 0;
+        const maxRetries = 3;
+        
         const attemptConnection = async () => {
             try {
+                // Create session directory for this specific connection
+                const sessionDir = path.join(BASE_SESSION_DIR, id.toString());
+                logWithContext('debug', 'Creando directorio de sesión', {
+                    integrationId: id,
+                    sessionDir
+                });
+                
+                if (!fs.existsSync(sessionDir)) {
+                    fs.mkdirSync(sessionDir, { recursive: true });
+                }
+                
+                // Initialize auth state from the session directory
                 const { state, saveCreds } = await useMultiFileAuthState(sessionDir);
                 
+                logWithContext('info', 'Estado de autenticación inicializado', {
+                    integrationId: id
+                });
+                
+                // Create WhatsApp connection
                 const sock = makeWASocket({
                     auth: state,
-                    printQRInTerminal: true,
-                    logger: pino({ level: 'silent' }),
-                    browser: ['Ublix', 'Chrome', '1.0.0'],
+                    printQRInTerminal: false,
+                    markOnlineOnConnect: false,
+                    defaultQueryTimeoutMs: 60000,
+                    logger: pino({ level: 'debug' }),
+                    browser: ['Ubuntu', 'Chrome', '10.0'],
                     connectTimeoutMs: 60000,
                     keepAliveIntervalMs: 30000,
-                    retryRequestDelayMs: 2000,
-                    maxRetries: 3,
-                    markOnlineOnConnect: true,
-                    syncFullHistory: false,
-                    emitOwnEvents: false,
-                    defaultQueryTimeoutMs: 60000
+                    retryRequestDelayMs: 5000,
+                    emitOwnEvents: true
                 });
-
-                // Manejo de eventos de conexión
+                
+                // Save credentials when updated
+                sock.ev.on('creds.update', saveCreds);
+                
+                // Handle connection updates
                 sock.ev.on('connection.update', async (update) => {
                     const { connection, lastDisconnect, qr } = update;
                     
+                    logWithContext('info', 'Actualización de conexión recibida', {
+                        integrationId: id,
+                        connection,
+                        hasQR: !!qr,
+                        disconnectReason: lastDisconnect?.error?.output?.payload?.message,
+                        statusCode: lastDisconnect?.error?.output?.statusCode
+                    });
+                    
                     if (qr) {
-                        this.qrCodes.set(id, qr);
-                        qrcode.generate(qr, { small: true });
-                        await this.updateIntegrationStatus(id, 'QR_GENERATED', { qr });
-                    }
-
-                    if (connection === 'close') {
-                        const shouldReconnect = lastDisconnect?.error?.output?.statusCode !== DisconnectReason.loggedOut;
-                        
-                        if (shouldReconnect) {
-                            logWithContext('info', `Reconectando WhatsApp para ${name} (${phone_number})`, {
-                                integrationId: id,
-                                reason: lastDisconnect?.error?.message
-                            });
-                            
-                            // Esperar antes de reconectar
-                            await new Promise(resolve => setTimeout(resolve, 5000));
-                            await attemptConnection();
-                        } else {
-                            logWithContext('error', `Conexión cerrada permanentemente para ${name} (${phone_number})`, {
-                                integrationId: id,
-                                reason: 'LOGGED_OUT'
-                            });
-                            await this.updateIntegrationStatus(id, 'DISCONNECTED', { reason: 'LOGGED_OUT' });
-                            this.connections.delete(id);
-                        }
-                    } else if (connection === 'open') {
-                        logWithContext('info', `Conexión establecida para ${name} (${phone_number})`, {
+                        logWithContext('info', 'Código QR recibido', {
                             integrationId: id
                         });
-                        await this.updateIntegrationStatus(id, 'CONNECTED');
+                        await this.updateIntegrationStatus(id, 'awaiting_qr_scan', qr);
+                    }
+                    
+                    if (connection === 'close') {
+                        const statusCode = lastDisconnect?.error?.output?.statusCode;
+                        const shouldReconnect = (
+                            lastDisconnect?.error instanceof Boom && 
+                            statusCode !== DisconnectReason.loggedOut
+                        );
+                        
+                        logWithContext('warn', 'Conexión cerrada', {
+                            integrationId: id,
+                            statusCode,
+                            shouldReconnect,
+                            error: lastDisconnect?.error?.message || 'Error desconocido'
+                        });
+                        
+                        if (shouldReconnect) {
+                            logWithContext('info', 'Intentando reconexión', {
+                                integrationId: id
+                            });
+                            setTimeout(() => this.createConnection(integration), 5000);
+                        } else {
+                            logWithContext('error', 'Conexión cerrada permanentemente', {
+                                integrationId: id,
+                                phoneNumberId: phone_number_id
+                            });
+                            await this.updateIntegrationStatus(id, 'disconnected');
+                            
+                            if (lastDisconnect.error?.output?.statusCode === DisconnectReason.loggedOut) {
+                                logWithContext('info', 'Eliminando archivos de sesión', {
+                                    integrationId: id,
+                                    phoneNumberId: phone_number_id
+                                });
+                                try {
+                                    fs.rmSync(sessionDir, { recursive: true, force: true });
+                                } catch (error) {
+                                    logWithContext('error', 'Error al eliminar archivos de sesión', {
+                                        err: error,
+                                        integrationId: id,
+                                        phoneNumberId: phone_number_id
+                                    });
+                                }
+                            }
+                            
+                            this.connections.delete(id);
+                        }
+                    }
+                    
+                    if (connection === 'open') {
+                        logWithContext('info', 'Conectado a WhatsApp', {
+                            integrationId: id,
+                            phoneNumberId: phone_number_id
+                        });
+                        await this.updateIntegrationStatus(id, 'connected');
                     }
                 });
-
-                // Manejo de credenciales
-                sock.ev.on('creds.update', saveCreds);
-
-                // Manejo de mensajes
+                
+                // Handle incoming messages
                 sock.ev.on('messages.upsert', async (m) => {
                     if (m.type === 'notify') {
+                        logger.info({
+                            integrationId: id,
+                            messageCount: m.messages.length,
+                            messageType: m.type
+                        }, "Received messages.upsert event");
+                        
                         for (const msg of m.messages) {
-                            if (!msg.key.fromMe) {
-                                await this.processIncomingMessage(id, integration, msg);
+                            try {
+                                // Log message structure for debugging
+                                logger.info({
+                                    integrationId: id,
+                                    messageStructure: {
+                                        hasMessage: !!msg.message,
+                                        fromMe: msg.key?.fromMe,
+                                        remoteJid: msg.key?.remoteJid,
+                                        messageTypes: msg.message ? Object.keys(msg.message) : []
+                                    }
+                                }, "Message structure debug");
+                                
+                                // Skip processing if this is a receipt, status update, or if the message is from ourselves
+                                if (msg.key.remoteJid === 'status@broadcast' ||
+                                    !msg.message) {
+                                    logger.debug({
+                                        reason: msg.key.fromMe ? 'fromMe (ignorado temporalmente)' : (msg.key.remoteJid === 'status@broadcast' ? 'broadcast' : 'no message'),
+                                        integrationId: id
+                                    }, 'Skipping message processing');
+                                    continue;
+                                }
+                                
+                                // Añadir verificación adicional para evitar bucles si el mensaje es nuestro
+                                if (msg.key.fromMe) {
+                                    logger.info({
+                                        integrationId: id,
+                                        fromMe: true,
+                                        remoteJid: msg.key.remoteJid
+                                    }, 'Procesando mensaje marcado como fromMe (diagnóstico)');
+                                    
+                                    // Verificar si es realmente una respuesta automática analizando el contenido del mensaje
+                                    const messageText = msg.message?.conversation || 
+                                                      msg.message?.extendedTextMessage?.text || 
+                                                      (msg.message?.imageMessage?.caption || '');
+                                    
+                                    // Si el mensaje contiene un patrón que indica que es una respuesta automática, ignorarlo
+                                    if (messageText.startsWith('Lo siento, hubo un error') || 
+                                        messageText.includes('procesando tu mensaje')) {
+                                        logger.info({
+                                            integrationId: id,
+                                            messagePreview: messageText.substring(0, 30)
+                                        }, 'Ignorando respuesta automática para evitar bucles');
+                                        continue;
+                                    }
+                                }
+                                
+                                // En caso de que sea un mensaje marcado como fromMe, registrarlo para diagnóstico
+                                if (msg.key?.fromMe) {
+                                    logger.info({ 
+                                        integrationId: id, 
+                                        senderJid: msg.key.remoteJid,
+                                        isFromMe: true
+                                    }, 'Procesando mensaje marcado como fromMe para diagnóstico');
+                                }
+                                
+                                // Este logging es opcional y puede ser removido en producción
+                                logger.debug({
+                                    integrationId: id,
+                                    messageType: Object.keys(msg.message || {})[0] || 'unknown',
+                                    fromMe: msg.key.fromMe,
+                                    remoteJid: msg.key.remoteJid,
+                                    messageId: msg.key.id
+                                }, 'Message debug info');
+                                
+                                // Process message with our enhanced handler
+                                this.processIncomingMessage(id, integration, msg);
+                            } catch (err) {
+                                logger.error({
+                                    err,
+                                    integrationId: id,
+                                    messageId: msg.key?.id,
+                                    remoteJid: msg.key?.remoteJid
+                                }, 'Error handling incoming message event');
                             }
                         }
                     }
                 });
-
-                this.connections.set(id, sock);
-                return true;
-            } catch (error) {
-                logWithContext('error', `Error al crear conexión para ${name} (${phone_number})`, {
-                    integrationId: id,
-                    error: error.message
+                
+                // Add utility functions to the socket
+                sock.sendSimpleText = async (jid, text) => {
+                    return await sock.sendMessage(jid, { text });
+                };
+                
+                sock.sendImage = async (jid, imagePath, caption = '') => {
+                    const image = fs.readFileSync(imagePath);
+                    return await sock.sendMessage(jid, {
+                        image,
+                        caption
+                    });
+                };
+                
+                // Store connection in the map
+                this.connections.set(id, {
+                    sock: sock,
+                    integration,
+                    sessionDir,
+                    status: 'connecting'
                 });
-                await this.updateIntegrationStatus(id, 'ERROR', { error: error.message });
-                return false;
+                
+                return sock;
+            } catch (error) {
+                logger.error(
+                    { err: error, integrationId: id, phoneNumberId: phone_number_id },
+                    'Error in WhatsApp connection'
+                );
+                await this.updateIntegrationStatus(id, 'error', error.message);
+                return null;
             }
-        };
-
-        return await attemptConnection();
+        }
+        
+        while (retryCount < maxRetries) {
+            retryCount++;
+            logger.info({ integrationId: id }, `Attempting connection, attempt ${retryCount} of ${maxRetries}`);
+            const sock = await attemptConnection();
+            if (sock) {
+                return sock;
+            }
+        }
+        
+        return null;
     }
     
     // Update integration status in Supabase
@@ -352,8 +511,8 @@ class MultiWhatsAppService {
                 connection.status = status;
                 
                 // If additionalData is a QR code, store it in the connection
-                if (additionalData && status === 'QR_GENERATED') {
-                    connection.qrCode = additionalData.qr;
+                if (additionalData && status === 'awaiting_qr_scan') {
+                    connection.qrCode = additionalData;
                 }
                 
                 // Update in Supabase (without the QR code data which is too large)
@@ -512,7 +671,11 @@ class MultiWhatsAppService {
         // Guardar el ID del mensaje para evitar procesarlo varias veces
         const messageId = message.key?.id;
         
-        // Verificar si ya procesamos este mensaje
+        // Verificar si ya procesamos este mensaje (usando un Map para almacenar IDs recientes)
+        if (!this.processedMessageIds) {
+            this.processedMessageIds = new Map();
+        }
+        
         if (this.processedMessageIds.has(messageId)) {
             logger.debug({ integrationId, senderJid, messageId }, 'Mensaje duplicado recibido, ignorando');
             return;
@@ -520,6 +683,14 @@ class MultiWhatsAppService {
         
         // Almacenar este ID de mensaje como procesado (con expiración después de 5 minutos)
         this.processedMessageIds.set(messageId, Date.now());
+        
+        // Limpiar IDs de mensajes antiguos (más de 5 minutos)
+        const fiveMinutesAgo = Date.now() - 5 * 60 * 1000;
+        for (const [id, timestamp] of this.processedMessageIds.entries()) {
+            if (timestamp < fiveMinutesAgo) {
+                this.processedMessageIds.delete(id);
+            }
+        }
         
         logger.info({
             integrationId,
@@ -781,36 +952,41 @@ class MultiWhatsAppService {
 
     // Stop the service and clean up resources
     async shutdown() {
-        logWithContext('info', 'Iniciando apagado del servicio');
+        logger.info('Shutting down WhatsApp service...');
         
-        // Limpiar intervalos
-        if (this.messageCleanupInterval) {
-            clearInterval(this.messageCleanupInterval);
-        }
-        
+        // Clear periodic check interval
         if (this.periodicCheckInterval) {
             clearInterval(this.periodicCheckInterval);
+            this.periodicCheckInterval = null;
         }
         
-        // Cerrar todas las conexiones
-        for (const [id, connection] of this.connections.entries()) {
-            try {
-                if (connection.sock) {
-                    await connection.sock.logout();
-                }
-                this.connections.delete(id);
-            } catch (error) {
-                logWithContext('error', 'Error cerrando conexión', {
-                    err: error,
-                    integrationId: id
-                });
-            }
+        // Clear message cleanup interval
+        if (this.messageCleanupInterval) {
+            clearInterval(this.messageCleanupInterval);
+            this.messageCleanupInterval = null;
         }
         
-        // Limpiar mensajes procesados
-        this.processedMessageIds.clear();
+        // Unsubscribe from realtime channel
+        if (this.realtimeChannel) {
+            await this.realtimeChannel.unsubscribe();
+            logger.info('Unsubscribed from realtime channel');
+            this.realtimeChannel = null;
+        }
         
-        logWithContext('info', 'Servicio apagado correctamente');
+        // Close all active connections
+        const connectionIds = Array.from(this.connections.keys());
+        logger.info(`Closing ${connectionIds.length} active connections`);
+        
+        for (const id of connectionIds) {
+            await this.removeConnection(id);
+        }
+        
+        // Clear processed message IDs
+        if (this.processedMessageIds) {
+            this.processedMessageIds.clear();
+        }
+        
+        logger.info('WhatsApp service shutdown complete');
     }
 }
 
