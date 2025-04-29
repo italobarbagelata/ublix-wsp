@@ -250,222 +250,97 @@ class MultiWhatsAppService {
     
     // Create a single WhatsApp connection
     async createConnection(integration) {
-        const { id, phone_number_id } = integration;
-        logWithContext('info', 'Iniciando creación de conexión WhatsApp', {
-            integrationId: id,
-            phoneNumberId: phone_number_id
-        });
+        const { id, phone_number, name } = integration;
+        const sessionDir = path.join(BASE_SESSION_DIR, id);
         
-        let retryCount = 0;
-        const maxRetries = 3;
-        let lastError = null;
-        
+        if (!fs.existsSync(sessionDir)) {
+            fs.mkdirSync(sessionDir, { recursive: true });
+        }
+
         const attemptConnection = async () => {
             try {
-                // Create session directory for this specific connection
-                const sessionDir = path.join(BASE_SESSION_DIR, id.toString());
-                logWithContext('debug', 'Creando directorio de sesión', {
-                    integrationId: id,
-                    sessionDir
-                });
-                
-                if (!fs.existsSync(sessionDir)) {
-                    fs.mkdirSync(sessionDir, { recursive: true });
-                }
-                
-                // Initialize auth state from the session directory
                 const { state, saveCreds } = await useMultiFileAuthState(sessionDir);
                 
-                logWithContext('info', 'Estado de autenticación inicializado', {
-                    integrationId: id
-                });
-                
-                // Create WhatsApp connection with improved error handling
                 const sock = makeWASocket({
                     auth: state,
-                    printQRInTerminal: false,
-                    markOnlineOnConnect: false,
-                    defaultQueryTimeoutMs: 60000,
-                    logger: pino({ level: 'debug' }),
-                    browser: ['Ubuntu', 'Chrome', '10.0'],
+                    printQRInTerminal: true,
+                    logger: pino({ level: 'silent' }),
+                    browser: ['Ublix', 'Chrome', '1.0.0'],
                     connectTimeoutMs: 60000,
                     keepAliveIntervalMs: 30000,
-                    retryRequestDelayMs: 5000,
-                    emitOwnEvents: true,
-                    maxRetries: 5,
-                    retryDelayMs: 10000,
-                    syncFullHistory: false
+                    retryRequestDelayMs: 2000,
+                    maxRetries: 3,
+                    markOnlineOnConnect: true,
+                    syncFullHistory: false,
+                    emitOwnEvents: false,
+                    defaultQueryTimeoutMs: 60000
                 });
-                
-                // Save credentials when updated
-                sock.ev.on('creds.update', saveCreds);
-                
-                // Handle connection updates with improved error handling
+
+                // Manejo de eventos de conexión
                 sock.ev.on('connection.update', async (update) => {
                     const { connection, lastDisconnect, qr } = update;
                     
-                    logWithContext('info', 'Actualización de conexión recibida', {
-                        integrationId: id,
-                        connection,
-                        hasQR: !!qr,
-                        disconnectReason: lastDisconnect?.error?.output?.payload?.message,
-                        statusCode: lastDisconnect?.error?.output?.statusCode
-                    });
-                    
                     if (qr) {
-                        logWithContext('info', 'Código QR recibido', {
-                            integrationId: id
-                        });
-                        await this.updateIntegrationStatus(id, 'awaiting_qr_scan', qr);
+                        this.qrCodes.set(id, qr);
+                        qrcode.generate(qr, { small: true });
+                        await this.updateIntegrationStatus(id, 'QR_GENERATED', { qr });
                     }
-                    
+
                     if (connection === 'close') {
-                        const statusCode = lastDisconnect?.error?.output?.statusCode;
-                        const shouldReconnect = (
-                            lastDisconnect?.error instanceof Boom && 
-                            statusCode !== DisconnectReason.loggedOut
-                        );
-                        
-                        logWithContext('warn', 'Conexión cerrada', {
-                            integrationId: id,
-                            statusCode,
-                            shouldReconnect,
-                            error: lastDisconnect?.error?.message || 'Error desconocido'
-                        });
+                        const shouldReconnect = lastDisconnect?.error?.output?.statusCode !== DisconnectReason.loggedOut;
                         
                         if (shouldReconnect) {
-                            logWithContext('info', 'Intentando reconexión', {
-                                integrationId: id
+                            logWithContext('info', `Reconectando WhatsApp para ${name} (${phone_number})`, {
+                                integrationId: id,
+                                reason: lastDisconnect?.error?.message
                             });
+                            
                             // Esperar antes de reconectar
                             await new Promise(resolve => setTimeout(resolve, 5000));
-                            await this.createConnection(integration);
+                            await attemptConnection();
                         } else {
-                            logWithContext('error', 'Conexión cerrada permanentemente', {
+                            logWithContext('error', `Conexión cerrada permanentemente para ${name} (${phone_number})`, {
                                 integrationId: id,
-                                phoneNumberId: phone_number_id
+                                reason: 'LOGGED_OUT'
                             });
-                            await this.updateIntegrationStatus(id, 'disconnected');
-                            
-                            if (lastDisconnect.error?.output?.statusCode === DisconnectReason.loggedOut) {
-                                logWithContext('info', 'Eliminando archivos de sesión', {
-                                    integrationId: id,
-                                    phoneNumberId: phone_number_id
-                                });
-                                try {
-                                    fs.rmSync(sessionDir, { recursive: true, force: true });
-                                } catch (error) {
-                                    logWithContext('error', 'Error al eliminar archivos de sesión', {
-                                        err: error,
-                                        integrationId: id,
-                                        phoneNumberId: phone_number_id
-                                    });
-                                }
-                            }
-                            
+                            await this.updateIntegrationStatus(id, 'DISCONNECTED', { reason: 'LOGGED_OUT' });
                             this.connections.delete(id);
                         }
-                    }
-                    
-                    if (connection === 'open') {
-                        logWithContext('info', 'Conectado a WhatsApp', {
-                            integrationId: id,
-                            phoneNumberId: phone_number_id
+                    } else if (connection === 'open') {
+                        logWithContext('info', `Conexión establecida para ${name} (${phone_number})`, {
+                            integrationId: id
                         });
-                        await this.updateIntegrationStatus(id, 'connected');
+                        await this.updateIntegrationStatus(id, 'CONNECTED');
                     }
                 });
-                
-                // Handle incoming messages with improved error handling
+
+                // Manejo de credenciales
+                sock.ev.on('creds.update', saveCreds);
+
+                // Manejo de mensajes
                 sock.ev.on('messages.upsert', async (m) => {
                     if (m.type === 'notify') {
                         for (const msg of m.messages) {
-                            try {
+                            if (!msg.key.fromMe) {
                                 await this.processIncomingMessage(id, integration, msg);
-                            } catch (error) {
-                                logWithContext('error', 'Error procesando mensaje', {
-                                    err: error,
-                                    integrationId: id,
-                                    messageId: msg.key?.id
-                                });
                             }
                         }
                     }
                 });
-                
-                // Add utility functions to the socket
-                sock.sendSimpleText = async (jid, text) => {
-                    try {
-                        return await sock.sendMessage(jid, { text });
-                    } catch (error) {
-                        logWithContext('error', 'Error enviando mensaje de texto', {
-                            err: error,
-                            integrationId: id,
-                            jid
-                        });
-                        throw error;
-                    }
-                };
-                
-                sock.sendImage = async (jid, imagePath, caption = '') => {
-                    try {
-                        const image = fs.readFileSync(imagePath);
-                        return await sock.sendMessage(jid, {
-                            image,
-                            caption
-                        });
-                    } catch (error) {
-                        logWithContext('error', 'Error enviando imagen', {
-                            err: error,
-                            integrationId: id,
-                            jid
-                        });
-                        throw error;
-                    }
-                };
-                
-                // Store connection in the map
-                this.connections.set(id, {
-                    sock: sock,
-                    integration,
-                    sessionDir,
-                    status: 'connecting'
-                });
-                
-                return sock;
+
+                this.connections.set(id, sock);
+                return true;
             } catch (error) {
-                lastError = error;
-                logWithContext('error', 'Error en la conexión WhatsApp', {
-                    err: error,
+                logWithContext('error', `Error al crear conexión para ${name} (${phone_number})`, {
                     integrationId: id,
-                    phoneNumberId: phone_number_id
+                    error: error.message
                 });
-                await this.updateIntegrationStatus(id, 'error', error.message);
-                return null;
+                await this.updateIntegrationStatus(id, 'ERROR', { error: error.message });
+                return false;
             }
-        }
-        
-        while (retryCount < maxRetries) {
-            retryCount++;
-            logWithContext('info', `Intento de conexión ${retryCount} de ${maxRetries}`, {
-                integrationId: id
-            });
-            
-            const sock = await attemptConnection();
-            if (sock) {
-                return sock;
-            }
-            
-            // Esperar antes de reintentar
-            await new Promise(resolve => setTimeout(resolve, 5000));
-        }
-        
-        logWithContext('error', 'Máximo número de intentos de conexión alcanzado', {
-            integrationId: id,
-            lastError: lastError?.message
-        });
-        
-        return null;
+        };
+
+        return await attemptConnection();
     }
     
     // Update integration status in Supabase
@@ -477,8 +352,8 @@ class MultiWhatsAppService {
                 connection.status = status;
                 
                 // If additionalData is a QR code, store it in the connection
-                if (additionalData && status === 'awaiting_qr_scan') {
-                    connection.qrCode = additionalData;
+                if (additionalData && status === 'QR_GENERATED') {
+                    connection.qrCode = additionalData.qr;
                 }
                 
                 // Update in Supabase (without the QR code data which is too large)
@@ -566,53 +441,181 @@ class MultiWhatsAppService {
     
     // Process incoming message (implement your chatbot logic here)
     async processIncomingMessage(integrationId, integration, message) {
+        const senderJid = message.key.remoteJid;
+        
+        // Inicial debug log
+        logger.info({
+            integrationId,
+            senderJid,
+            hasMessageObj: !!message.message,
+            messageKeyId: message.key?.id
+        }, 'Iniciando procesamiento de mensaje');
+        
+        // Verificar si es un mensaje válido
+        if (!message || !message.message) {
+            logger.debug({ integrationId, senderJid }, 'Mensaje vacío recibido, ignorando');
+            return;
+        }
+        
+        // Verificar si es un mensaje de estado/broadcast
+        if (senderJid === 'status@broadcast') {
+            logger.debug('Mensaje broadcast recibido, ignorando');
+            return;
+        }
+        
+        // Si es fromMe, agregar log especial para diagnóstico
+        if (message.key?.fromMe) {
+            logger.info({ 
+                integrationId, 
+                senderJid,
+                isFromMe: true
+            }, 'Procesando mensaje marcado como fromMe para diagnóstico');
+        }
+        
+        // Debug log de tipos de mensaje disponibles
+        logger.info({
+            integrationId,
+            messageTypes: Object.keys(message.message),
+            hasConversation: !!message.message?.conversation,
+            hasExtendedText: !!message.message?.extendedTextMessage,
+            hasImage: !!message.message?.imageMessage
+        }, 'Tipos de mensaje disponibles');
+        
+        // Extraer el contenido del mensaje de diferentes tipos posibles
+        const messageContent = message.message?.conversation || 
+                             message.message?.extendedTextMessage?.text || 
+                             message.message?.imageMessage?.caption || 
+                             (message.message?.imageMessage ? 'Imagen recibida' : null) ||
+                             (message.message?.documentMessage ? 'Documento recibido' : null) ||
+                             (message.message?.audioMessage ? 'Audio recibido' : null) ||
+                             (message.message?.videoMessage ? 'Video recibido' : null) ||
+                             null;
+        
+        // Verificar si hay contenido de mensaje
+        if (!messageContent || messageContent.trim() === '') {
+            logger.debug({ integrationId, senderJid }, 'Mensaje sin contenido recibido, ignorando');
+            return;
+        }
+        
+        // Si el mensaje es nuestro y contiene textos de respuesta automática, ignorarlo para evitar bucles
+        if (message.key?.fromMe && (
+            messageContent.startsWith('Lo siento, hubo un error') || 
+            messageContent.includes('procesando tu mensaje')
+        )) {
+            logger.info({
+                integrationId,
+                messagePreview: messageContent.substring(0, 50)
+            }, 'Ignorando respuesta automática para evitar bucles');
+            return;
+        }
+        
+        // Guardar el ID del mensaje para evitar procesarlo varias veces
+        const messageId = message.key?.id;
+        
+        // Verificar si ya procesamos este mensaje
+        if (this.processedMessageIds.has(messageId)) {
+            logger.debug({ integrationId, senderJid, messageId }, 'Mensaje duplicado recibido, ignorando');
+            return;
+        }
+        
+        // Almacenar este ID de mensaje como procesado (con expiración después de 5 minutos)
+        this.processedMessageIds.set(messageId, Date.now());
+        
+        logger.info({
+            integrationId,
+            sender: senderJid,
+            messageId,
+            message: messageContent
+        }, 'Nuevo mensaje válido recibido');
+        
         try {
-            // Verificar si el mensaje ya fue procesado
-            const messageId = message.key?.id;
-            if (this.processedMessageIds.has(messageId)) {
-                logWithContext('debug', 'Mensaje ya procesado', {
-                    integrationId,
-                    messageId
-                });
-                return;
-            }
-
-            // Marcar mensaje como procesado
-            this.processedMessageIds.set(messageId, Date.now());
-
-            // Procesar el mensaje
-            const response = await this.handleMessage(integrationId, integration, message);
+            // Log before API call
+            logger.info({
+                integrationId,
+                senderJid,
+                message: messageContent,
+                projectId: integration.project_id
+            }, 'Realizando llamada a API de Ublix');
             
-            if (response) {
-                await this.sendMessage(integrationId, message.key.remoteJid, response);
+            // Call the Ublix Chat API
+            const response = await fetch(CHAT_API_URL + '/api/chat/message', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify({
+                    message: messageContent,
+                    project_id: integration.project_id,
+                    user_id: senderJid // Using WhatsApp JID as user_id
+                })
+            });
+
+            // Log API response status
+            logger.info({
+                integrationId,
+                apiStatus: response.status,
+                apiStatusText: response.statusText
+            }, 'Respuesta recibida de API de Ublix');
+
+            if (!response.ok) {
+                throw new Error(`Chat API error: ${response.statusText}`);
             }
+
+            const data = await response.json();
+            
+            // Log response data
+            logger.info({
+                integrationId,
+                hasResponse: !!data.response,
+                responseLength: data.response ? data.response.length : 0,
+                messageId: data.message_id
+            }, 'Procesando respuesta de API');
+            
+            // Send the response back to WhatsApp
+            logger.info({
+                integrationId,
+                senderJid,
+                responsePreview: data.response ? data.response.substring(0, 50) + '...' : 'Sin respuesta',
+            }, 'Enviando respuesta a WhatsApp');
+            
+            await this.sendMessage(integrationId, senderJid, data.response);
+            
+            // Log the interaction
+            logger.info({
+                integrationId,
+                sender: senderJid,
+                message: messageContent,
+                response: data.response,
+                messageId: data.message_id
+            }, 'Message processed successfully');
         } catch (error) {
-            logWithContext('error', 'Error procesando mensaje', {
+            logger.error({
                 err: error,
                 integrationId,
-                messageId: message.key?.id
-            });
+                sender: senderJid,
+                message: messageContent,
+                errorName: error.name,
+                errorMessage: error.message,
+                errorStack: error.stack
+            }, 'Error processing message');
             
-            // Intentar enviar mensaje de error al usuario
+            // Intentar enviar un mensaje de error al usuario
             try {
+                logger.info({ integrationId, senderJid }, 'Intentando enviar mensaje de error al usuario');
                 await this.sendMessage(
-                    integrationId,
-                    message.key.remoteJid,
+                    integrationId, 
+                    senderJid, 
                     'Lo siento, hubo un error procesando tu mensaje. Por favor, intenta de nuevo más tarde.'
                 );
+                logger.info({ integrationId, senderJid }, 'Mensaje de error enviado correctamente');
             } catch (sendError) {
-                logWithContext('error', 'Error enviando mensaje de error', {
+                logger.error({
                     err: sendError,
-                    integrationId
-                });
+                    integrationId,
+                    senderJid
+                }, 'Error al enviar mensaje de error al usuario');
             }
         }
-    }
-    
-    async handleMessage(integrationId, integration, message) {
-        // Implementar la lógica de procesamiento de mensajes aquí
-        // Por ejemplo, llamar a una API externa o procesar el mensaje localmente
-        return 'Mensaje recibido correctamente';
     }
     
     // Remove a connection
