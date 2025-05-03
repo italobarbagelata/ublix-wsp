@@ -492,7 +492,7 @@ app.post('/api/connections/:integrationId/refresh', checkService, async (req, re
         
         // Fetch the integration data from Supabase
         const { data, error } = await whatsappService.supabase
-            .from('integration_whatsapp_business')
+            .from('integration_whatsapp_web')
             .select('*')
             .eq('id', integrationId)
             .single();

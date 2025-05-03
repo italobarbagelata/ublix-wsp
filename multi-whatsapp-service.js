@@ -164,7 +164,7 @@ class MultiWhatsAppService {
             
             // Fetch all active integrations from Supabase
             const { data, error } = await supabase
-                .from('integration_whatsapp_business')
+                .from('integration_whatsapp_web')
                 .select('*')
                 .eq('active', true);
                 
@@ -205,7 +205,7 @@ class MultiWhatsAppService {
                 {
                     event: '*',
                     schema: 'public',
-                    table: 'integration_whatsapp_business'
+                    table: 'integration_whatsapp_web'
                 },
                 async (payload) => {
                     logger.info({ eventType: payload.eventType, integrationId: payload.new?.id || payload.old?.id }, 'Integration change detected');
@@ -517,7 +517,7 @@ class MultiWhatsAppService {
                 
                 // Update in Supabase (without the QR code data which is too large)
                 const { error } = await supabase
-                    .from('integration_whatsapp_business')
+                    .from('integration_whatsapp_web')
                     .update({
                         status: status,
                         updated_at: new Date().toISOString()
@@ -909,7 +909,7 @@ class MultiWhatsAppService {
                 
                 // Get all active integrations from database
                 const { data, error } = await supabase
-                    .from('integration_whatsapp_business')
+                    .from('integration_whatsapp_web')
                     .select('*')
                     .eq('active', true);
                     
