@@ -479,18 +479,6 @@ class MultiWhatsAppService {
                     status: 'connecting'
                 });
                 
-                // Añadir un ping periódico para mantener la conexión activa
-                setInterval(async () => {
-                    if (sock) {
-                        try {
-                            await sock.sendSimpleText('status@broadcast', 'ping');
-                        } catch (error) {
-                            logger.error('Error en ping de conexión:', error);
-                            // Intentar reconexión
-                            await this.createConnection(integration);
-                        }
-                    }
-                }, 30000);
                 
                 return sock;
             } catch (error) {
