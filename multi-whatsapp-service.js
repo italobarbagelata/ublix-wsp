@@ -296,6 +296,48 @@ class MultiWhatsAppService {
                 // Save credentials when updated
                 sock.ev.on('creds.update', saveCreds);
                 
+                // Capturar información del usuario al iniciar sesión
+                sock.ev.on('auth.update', async (authInfo) => {
+                    try {
+                        logger.info({
+                            integrationId: id,
+                            event: 'auth.update',
+                            hasAuthInfo: !!authInfo,
+                            authProps: authInfo ? Object.keys(authInfo) : []
+                        }, 'Actualización de autenticación recibida');
+                        
+                        // Si la conexión está activa, actualizar información en BD
+                        if (this.connections.has(id) && authInfo) {
+                            // Si hay un cambio en la autenticación y ya tenemos información del usuario
+                            // actualizar la información en la base de datos
+                            if (sock.user) {
+                                logger.info({
+                                    integrationId: id,
+                                    userInfo: {
+                                        name: sock.user.name,
+                                        id: sock.user.id,
+                                        phone: sock.user.id?.split(':')[0]
+                                    }
+                                }, 'Información de usuario obtenida, actualizando BD');
+                                
+                                // Actualizar la información en la conexión
+                                const connectionData = this.connections.get(id);
+                                connectionData.userInfo = sock.user;
+                                
+                                // Actualizar estado en la base de datos si la conexión está abierta
+                                if (connectionData.status === 'connected') {
+                                    await this.updateIntegrationStatus(id, 'connected');
+                                }
+                            }
+                        }
+                    } catch (error) {
+                        logger.error({
+                            integrationId: id,
+                            err: error
+                        }, 'Error procesando evento auth.update');
+                    }
+                });
+                
                 // Handle connection updates
                 sock.ev.on('connection.update', async (update) => {
                     const { connection, lastDisconnect, qr } = update;
@@ -362,10 +404,26 @@ class MultiWhatsAppService {
                     }
                     
                     if (connection === 'open') {
+                        // Obtener información del usuario conectado
+                        const userInfo = sock.user || {};
+                        
                         logWithContext('info', 'Conectado a WhatsApp', {
                             integrationId: id,
-                            phoneNumberId: phone_number_id
+                            phoneNumberId: phone_number_id,
+                            userInfo: {
+                                name: userInfo.name,
+                                id: userInfo.id,
+                                verifiedName: userInfo.verifiedName
+                            }
                         });
+                        
+                        // Almacenar la información del usuario en la conexión
+                        if (this.connections.has(id)) {
+                            const connectionData = this.connections.get(id);
+                            connectionData.userInfo = userInfo;
+                        }
+                        
+                        // Actualizar estado en la base de datos
                         await this.updateIntegrationStatus(id, 'connected');
                     }
                 });
@@ -458,6 +516,57 @@ class MultiWhatsAppService {
                     }
                 });
                 
+                // Escuchar actualizaciones de contactos para obtener información de perfil
+                sock.ev.on('contacts.update', async (updates) => {
+                    try {
+                        logger.info({
+                            integrationId: id,
+                            updatesCount: updates.length,
+                            updates: updates.map(u => ({id: u.id, name: u.name, notify: u.notify}))
+                        }, 'Actualización de contactos recibida');
+                        
+                        // Buscar si hay actualizaciones para nuestro propio perfil
+                        if (sock.user) {
+                            const selfId = sock.user.id?.split('@')[0];
+                            const selfUpdates = updates.filter(u => u.id?.split('@')[0] === selfId);
+                            
+                            if (selfUpdates.length > 0) {
+                                logger.info({
+                                    integrationId: id,
+                                    selfUpdates: selfUpdates.map(u => ({
+                                        id: u.id,
+                                        name: u.name || u.notify,
+                                        notify: u.notify
+                                    }))
+                                }, 'Actualización de perfil propio recibida');
+                                
+                                // Actualizar información en la conexión
+                                if (this.connections.has(id)) {
+                                    const connectionData = this.connections.get(id);
+                                    if (!connectionData.userInfo) {
+                                        connectionData.userInfo = {};
+                                    }
+                                    
+                                    // Actualizar información de perfil
+                                    const selfUpdate = selfUpdates[0];
+                                    if (selfUpdate.name) connectionData.userInfo.name = selfUpdate.name;
+                                    if (selfUpdate.notify) connectionData.userInfo.notify = selfUpdate.notify;
+                                    
+                                    // Actualizar en BD si la conexión está activa
+                                    if (connectionData.status === 'connected') {
+                                        await this.updateIntegrationStatus(id, 'connected');
+                                    }
+                                }
+                            }
+                        }
+                    } catch (error) {
+                        logger.error({
+                            integrationId: id,
+                            err: error
+                        }, 'Error procesando actualización de contactos');
+                    }
+                });
+                
                 // Add utility functions to the socket
                 sock.sendSimpleText = async (jid, text) => {
                     return await sock.sendMessage(jid, { text });
@@ -516,24 +625,56 @@ class MultiWhatsAppService {
                     connection.qrCode = additionalData;
                 }
                 
-                // Update in Supabase (without the QR code data which is too large)
+                // Preparar datos para actualizar en Supabase
+                const updateData = {
+                    status: status,
+                    updated_at: new Date().toISOString()
+                };
+                
+                // Si el estado es 'connected', agregar información adicional
+                if (status === 'connected') {
+                    updateData.connected_at = new Date().toISOString();
+                    updateData.last_connected_at = new Date().toISOString();
+                    
+                    // Si hay información de perfil disponible, guardarla
+                    if (connection.sock && connection.sock.user) {
+                        updateData.profile_name = connection.sock.user.name || null;
+                        updateData.profile_id = connection.sock.user.id || null;
+                    }
+                    
+                    logger.info({
+                        integrationId,
+                        status,
+                        updatedFields: Object.keys(updateData)
+                    }, 'Actualizando información completa de conexión en BD');
+                }
+                
+                // Update in Supabase
                 const { error } = await supabase
                     .from('integration_whatsapp_web')
-                    .update({
-                        status: status,
-                        updated_at: new Date().toISOString()
-                    })
+                    .update(updateData)
                     .eq('id', integrationId);
                 
                 if (error) {
-                    logger.error(`Error updating integration status in database for ${integrationId}:`, error);
+                    logger.error({
+                        err: error,
+                        integrationId,
+                        status
+                    }, 'Error updating integration status in database');
+                } else {
+                    logger.info({
+                        integrationId,
+                        status,
+                        success: true
+                    }, 'BD actualizada correctamente');
                 }
-                // else {
-                //     console.log(`Updated integration status for ${integrationId} to ${status}`);
-                // }
             }
         } catch (error) {
-            logger.error(`Error updating integration status for ${integrationId}:`, error);
+            logger.error({
+                err: error,
+                integrationId,
+                status
+            }, 'Error updating integration status');
         }
     }
     
