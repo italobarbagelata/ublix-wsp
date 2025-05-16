@@ -770,7 +770,7 @@ class MultiWhatsAppService {
                 .from('whatsapp_web_conversation_states')
                 .select('*')
                 .eq('project_id', integration.project_id)
-                .eq('business_account_id', integration.integrationId)
+                .eq('business_account_id', integration.id)
                 .eq('phone_number_id', integration.phone_number_id)
                 .eq('user_id', senderJid)
                 .single();
@@ -790,7 +790,7 @@ class MultiWhatsAppService {
                     .from('whatsapp_web_conversation_states')
                     .insert({
                         project_id: integration.project_id,
-                        business_account_id: integration.integrationId,
+                        business_account_id: integration.id,
                         phone_number_id: integration.phone_number_id,
                         user_id: senderJid,
                         bot_active: true
@@ -808,14 +808,14 @@ class MultiWhatsAppService {
                 logger.info({
                     integrationId,
                     senderJid,
-                    business_account_id: integration.integrationId,
+                    business_account_id: integration.id,
                     phone_number_id: integration.phone_number_id
                 }, 'Nuevo estado de conversación creado con bot activado');
             } else if (!conversationState.bot_active) {
                 logger.info({
                     integrationId,
                     senderJid,
-                    business_account_id: integration.integrationId,
+                    business_account_id: integration.id,
                     phone_number_id: integration.phone_number_id
                 }, 'Bot desactivado para este usuario - omitiendo procesamiento');
                 return;
