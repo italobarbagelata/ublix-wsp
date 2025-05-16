@@ -764,6 +764,71 @@ class MultiWhatsAppService {
             return;
         }
         
+        // Verificar el estado del bot para este usuario
+        try {
+            const { data: conversationState, error } = await supabase
+                .from('whatsapp_web_conversation_states')
+                .select('*')
+                .eq('project_id', integration.project_id)
+                .eq('business_account_id', integration.business_account_id)
+                .eq('phone_number_id', integration.phone_number_id)
+                .eq('user_id', senderJid)
+                .single();
+
+            if (error && error.code !== 'PGRST116') { // PGRST116 es el código para "no se encontró"
+                logger.error({
+                    err: error,
+                    integrationId,
+                    senderJid
+                }, 'Error al verificar estado de conversación');
+                return;
+            }
+
+            if (!conversationState) {
+                // Si no existe el registro, crear uno nuevo con el bot activado
+                const { error: insertError } = await supabase
+                    .from('whatsapp_web_conversation_states')
+                    .insert({
+                        project_id: integration.project_id,
+                        business_account_id: integration.business_account_id,
+                        phone_number_id: integration.phone_number_id,
+                        user_id: senderJid,
+                        bot_active: true
+                    });
+
+                if (insertError) {
+                    logger.error({
+                        err: insertError,
+                        integrationId,
+                        senderJid
+                    }, 'Error al crear nuevo estado de conversación');
+                    return;
+                }
+
+                logger.info({
+                    integrationId,
+                    senderJid,
+                    business_account_id: integration.business_account_id,
+                    phone_number_id: integration.phone_number_id
+                }, 'Nuevo estado de conversación creado con bot activado');
+            } else if (!conversationState.bot_active) {
+                logger.info({
+                    integrationId,
+                    senderJid,
+                    business_account_id: integration.business_account_id,
+                    phone_number_id: integration.phone_number_id
+                }, 'Bot desactivado para este usuario - omitiendo procesamiento');
+                return;
+            }
+        } catch (error) {
+            logger.error({
+                err: error,
+                integrationId,
+                senderJid
+            }, 'Error al verificar estado del bot');
+            return;
+        }
+        
         // Si es fromMe, agregar log especial para diagnóstico
         if (message.key?.fromMe) {
             logger.info({ 
