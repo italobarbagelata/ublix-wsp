@@ -763,9 +763,13 @@ class MultiWhatsAppService {
             logger.debug('Mensaje broadcast recibido, ignorando');
             return;
         }
+
+
+        logger.info('************* Mensaje recibido *************');
         
         // Verificar el estado del bot para este usuario
         try {
+            logger.info('Verificando estado de conversación');
             const { data: conversationState, error } = await supabase
                 .from('whatsapp_web_conversation_states')
                 .select('*')
@@ -774,6 +778,9 @@ class MultiWhatsAppService {
                 .eq('phone_number_id', integration.phone_number_id)
                 .eq('user_id', senderJid)
                 .single();
+
+            logger.info('Estado de conversación verificado');
+            logger.info(conversationState);
 
             if (error && error.code !== 'PGRST116') { // PGRST116 es el código para "no se encontró"
                 logger.error({
