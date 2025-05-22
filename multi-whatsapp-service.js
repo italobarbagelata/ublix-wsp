@@ -843,6 +843,40 @@ class MultiWhatsAppService {
                 senderJid,
                 isFromMe: true
             }, 'Procesando mensaje marcado como fromMe para diagnóstico');
+
+            // Verificar si el mensaje es del dueño del número
+            const connection = this.connections.get(integrationId);
+            if (connection && connection.userInfo && connection.userInfo.id === message.key.remoteJid) {
+                logger.info({
+                    integrationId,
+                    senderJid,
+                    messageContent
+                }, 'Mensaje detectado del dueño del número - Desactivando bot');
+
+                // Actualizar el estado del bot en la base de datos
+                const { error: updateError } = await supabase
+                    .from('whatsapp_web_conversation_states')
+                    .update({ bot_active: false })
+                    .eq('project_id', integration.project_id)
+                    .eq('business_account_id', integration.id)
+                    .eq('phone_number_id', integration.phone_number_id)
+                    .eq('user_id', senderJid);
+
+                if (updateError) {
+                    logger.error({
+                        err: updateError,
+                        integrationId,
+                        senderJid
+                    }, 'Error al desactivar el bot');
+                    return;
+                }
+
+                logger.info({
+                    integrationId,
+                    senderJid
+                }, 'Bot desactivado exitosamente');
+                return;
+            }
         }
         
         // Debug log de tipos de mensaje disponibles
