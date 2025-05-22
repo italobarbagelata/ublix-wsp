@@ -846,6 +846,9 @@ class MultiWhatsAppService {
 
             // Verificar si el mensaje es del dueño del número
             const connection = this.connections.get(integrationId);
+            logger.info('Connection *************');
+            logger.info(connection);
+
             if (connection && connection.userInfo && connection.userInfo.id === message.key.remoteJid) {
                 logger.info({
                     integrationId,
