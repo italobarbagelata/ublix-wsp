@@ -849,7 +849,18 @@ class MultiWhatsAppService {
             logger.info('Connection *************');
             logger.info(connection);
 
-            if (connection && connection.userInfo && connection.userInfo.id === message.key.remoteJid) {
+            // Extraer el número del senderJid (remover @s.whatsapp.net)
+            const senderNumber = senderJid.split('@')[0];
+            // Extraer el número del phone_number_id (remover el +)
+            const ownerNumber = connection.integration.phone_number_id.replace('+', '');
+
+            logger.info({
+                senderNumber,
+                ownerNumber,
+                match: senderNumber === ownerNumber
+            }, 'Comparando números');
+
+            if (senderNumber === ownerNumber) {
                 logger.info({
                     integrationId,
                     senderJid,
