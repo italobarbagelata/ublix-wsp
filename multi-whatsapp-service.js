@@ -836,108 +836,74 @@ class MultiWhatsAppService {
             return;
         }
         
-        // Si es fromMe, agregar log especial para diagnóstico
-        if (message.key?.fromMe) {
-            try {
-                logger.info({ 
-                    integrationId, 
-                    senderJid,
-                    isFromMe: true
-                }, 'Procesando mensaje marcado como fromMe para diagnóstico');
+        // Verificar si el mensaje es del dueño del número
+        const connection = this.connections.get(integrationId);
+        logger.info('Connection *************');
+        logger.info(connection);
 
-                // Extraer el contenido del mensaje primero
-                const messageContent = message.message?.conversation || 
-                                     message.message?.extendedTextMessage?.text || 
-                                     message.message?.imageMessage?.caption || 
-                                     (message.message?.imageMessage ? 'Imagen recibida' : null) ||
-                                     (message.message?.documentMessage ? 'Documento recibido' : null) ||
-                                     (message.message?.audioMessage ? 'Audio recibido' : null) ||
-                                     (message.message?.videoMessage ? 'Video recibido' : null) ||
-                                     null;
+        if (!connection) {
+            logger.error({
+                integrationId,
+                senderJid
+            }, 'No se encontró la conexión');
+            return;
+        }
 
-                // Verificar si el mensaje es del dueño del número
-                const connection = this.connections.get(integrationId);
-                logger.info('Connection *************');
-                logger.info(connection);
+        if (!connection.integration) {
+            logger.error({
+                integrationId,
+                senderJid
+            }, 'La conexión no tiene información de integración');
+            return;
+        }
 
-                if (!connection) {
-                    logger.error({
-                        integrationId,
-                        senderJid
-                    }, 'No se encontró la conexión');
-                    return;
-                }
+        // Verificar si el mensaje es del dueño usando fromMe y remoteJid
+        const isFromOwner = message.key.fromMe && 
+                          message.key.remoteJid === connection.userInfo.id;
 
-                if (!connection.integration) {
-                    logger.error({
-                        integrationId,
-                        senderJid
-                    }, 'La conexión no tiene información de integración');
-                    return;
-                }
+        logger.info({
+            fromMe: message.key.fromMe,
+            remoteJid: message.key.remoteJid,
+            ownerId: connection.userInfo.id,
+            isFromOwner
+        }, 'Verificando si el mensaje es del dueño');
 
-                // Obtener el ID del usuario de la conexión
-                const connectionUserId = connection.userInfo?.id?.split(':')[0];
-                // Extraer el número del senderJid (remover @s.whatsapp.net)
-                const senderNumber = senderJid.split('@')[0];
+        if (isFromOwner) {
+            // Log de los datos que se van a actualizar
+            logger.info({
+                project_id: connection.integration.project_id,
+                business_account_id: connection.integration.id,
+                phone_number_id: connection.integration.phone_number_id,
+                user_id: senderJid
+            }, 'Datos para actualización en BD');
 
-                logger.info({
-                    senderNumber,
-                    connectionUserId,
-                    match: senderNumber === connectionUserId
-                }, 'Comparando números');
+            // Actualizar el estado del bot en la base de datos
+            const { error: updateError } = await supabase
+                .from('whatsapp_web_conversation_states')
+                .update({ bot_active: false })
+                .eq('project_id', connection.integration.project_id)
+                .eq('business_account_id', connection.integration.id)
+                .eq('phone_number_id', connection.integration.phone_number_id)
+                .eq('user_id', senderJid);
 
-                logger.info('senderNumber *************');
-                logger.info(senderNumber);
-                logger.info('connectionUserId *************');
-                logger.info(connectionUserId);
-
-                if (senderNumber === connectionUserId) {
-                    // Log de los datos que se van a actualizar
-                    logger.info({
-                        project_id: connection.integration.project_id,
-                        business_account_id: connection.integration.id,
-                        phone_number_id: connection.integration.phone_number_id,
-                        user_id: senderJid
-                    }, 'Datos para actualización en BD');
-
-                    // Actualizar el estado del bot en la base de datos
-                    const { error: updateError } = await supabase
-                        .from('whatsapp_web_conversation_states')
-                        .update({ bot_active: false })
-                        .eq('project_id', connection.integration.project_id)
-                        .eq('business_account_id', connection.integration.id)
-                        .eq('phone_number_id', connection.integration.phone_number_id)
-                        .eq('user_id', senderJid);
-
-                    if (updateError) {
-                        logger.error({
-                            err: updateError,
-                            integrationId,
-                            senderJid,
-                            errorCode: updateError.code,
-                            errorMessage: updateError.message,
-                            errorDetails: updateError.details
-                        }, 'Error al desactivar el bot');
-                        return;
-                    }
-
-                    logger.info({
-                        integrationId,
-                        senderJid,
-                        success: true
-                    }, 'Bot desactivado exitosamente');
-                    return;
-                }
-            } catch (error) {
+            if (updateError) {
                 logger.error({
-                    err: error,
+                    err: updateError,
                     integrationId,
                     senderJid,
-                    errorStack: error.stack
-                }, 'Error al procesar mensaje del dueño');
+                    errorCode: updateError.code,
+                    errorMessage: updateError.message,
+                    errorDetails: updateError.details
+                }, 'Error al desactivar el bot');
                 return;
             }
+
+            logger.info({
+                integrationId,
+                senderJid,
+                success: true
+            }, 'Bot desactivado exitosamente');
+            return;
         }
         
         // Debug log de tipos de mensaje disponibles
