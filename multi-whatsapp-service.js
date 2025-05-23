@@ -845,6 +845,16 @@ class MultiWhatsAppService {
                     isFromMe: true
                 }, 'Procesando mensaje marcado como fromMe para diagnóstico');
 
+                // Extraer el contenido del mensaje primero
+                const messageContent = message.message?.conversation || 
+                                     message.message?.extendedTextMessage?.text || 
+                                     message.message?.imageMessage?.caption || 
+                                     (message.message?.imageMessage ? 'Imagen recibida' : null) ||
+                                     (message.message?.documentMessage ? 'Documento recibido' : null) ||
+                                     (message.message?.audioMessage ? 'Audio recibido' : null) ||
+                                     (message.message?.videoMessage ? 'Video recibido' : null) ||
+                                     null;
+
                 // Verificar si el mensaje es del dueño del número
                 const connection = this.connections.get(integrationId);
                 logger.info('Connection *************');
@@ -883,12 +893,6 @@ class MultiWhatsAppService {
                 logger.info(ownerNumber);
 
                 if (senderNumber === ownerNumber) {
-                    logger.info({
-                        integrationId,
-                        senderJid,
-                        messageContent
-                    }, 'Mensaje detectado del dueño del número - Desactivando bot');
-
                     // Log de los datos que se van a actualizar
                     logger.info({
                         project_id: connection.integration.project_id,
