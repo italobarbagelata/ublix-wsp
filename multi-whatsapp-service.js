@@ -916,7 +916,6 @@ class MultiWhatsAppService {
             return;
         }
         
-        // Debug log de tipos de mensaje disponibles
         logger.info({
             integrationId,
             messageTypes: Object.keys(message.message),
