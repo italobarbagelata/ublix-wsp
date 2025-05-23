@@ -887,7 +887,7 @@ class MultiWhatsAppService {
                 user_id: senderJid
             }, 'Datos para actualización en BD');
 
-            // Actualizar el estado del bot en la base de datos
+           
             const { error: updateError } = await supabase
                 .from('whatsapp_web_conversation_states')
                 .update({ bot_active: false })
