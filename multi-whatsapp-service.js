@@ -872,27 +872,39 @@ class MultiWhatsAppService {
                     messageContent
                 }, 'Mensaje detectado del dueño del número - Desactivando bot');
 
+                // Log de los datos que se van a actualizar
+                logger.info({
+                    project_id: connection.integration.project_id,
+                    business_account_id: connection.integration.id,
+                    phone_number_id: connection.integration.phone_number_id,
+                    user_id: senderJid
+                }, 'Datos para actualización en BD');
+
                 // Actualizar el estado del bot en la base de datos
                 const { error: updateError } = await supabase
                     .from('whatsapp_web_conversation_states')
                     .update({ bot_active: false })
-                    .eq('project_id', integration.project_id)
-                    .eq('business_account_id', integration.id)
-                    .eq('phone_number_id', integration.phone_number_id)
+                    .eq('project_id', connection.integration.project_id)
+                    .eq('business_account_id', connection.integration.id)
+                    .eq('phone_number_id', connection.integration.phone_number_id)
                     .eq('user_id', senderJid);
 
                 if (updateError) {
                     logger.error({
                         err: updateError,
                         integrationId,
-                        senderJid
+                        senderJid,
+                        errorCode: updateError.code,
+                        errorMessage: updateError.message,
+                        errorDetails: updateError.details
                     }, 'Error al desactivar el bot');
                     return;
                 }
 
                 logger.info({
                     integrationId,
-                    senderJid
+                    senderJid,
+                    success: true
                 }, 'Bot desactivado exitosamente');
                 return;
             }
