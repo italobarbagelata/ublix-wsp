@@ -860,6 +860,11 @@ class MultiWhatsAppService {
                 match: senderNumber === ownerNumber
             }, 'Comparando números');
 
+            logger.info('senderNumber *************');
+            logger.info(senderNumber);
+            logger.info('ownerNumber *************');
+            logger.info(ownerNumber);
+
             if (senderNumber === ownerNumber) {
                 logger.info({
                     integrationId,
