@@ -876,23 +876,23 @@ class MultiWhatsAppService {
                     return;
                 }
 
+                // Obtener el ID del usuario de la conexión
+                const connectionUserId = connection.userInfo?.id?.split(':')[0];
                 // Extraer el número del senderJid (remover @s.whatsapp.net)
                 const senderNumber = senderJid.split('@')[0];
-                // Extraer el número del phone_number_id (remover el +)
-                const ownerNumber = connection.integration.phone_number_id.replace('+', '');
 
                 logger.info({
                     senderNumber,
-                    ownerNumber,
-                    match: senderNumber === ownerNumber
+                    connectionUserId,
+                    match: senderNumber === connectionUserId
                 }, 'Comparando números');
 
                 logger.info('senderNumber *************');
                 logger.info(senderNumber);
-                logger.info('ownerNumber *************');
-                logger.info(ownerNumber);
+                logger.info('connectionUserId *************');
+                logger.info(connectionUserId);
 
-                if (senderNumber === ownerNumber) {
+                if (senderNumber === connectionUserId) {
                     // Log de los datos que se van a actualizar
                     logger.info({
                         project_id: connection.integration.project_id,
