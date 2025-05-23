@@ -857,14 +857,18 @@ class MultiWhatsAppService {
             return;
         }
 
-        // Verificar si el mensaje es del dueño usando fromMe y remoteJid
-        const isFromOwner = message.key.fromMe && 
-                          message.key.remoteJid === connection.userInfo.id;
+        // Extraer solo el número del phone_number_id (remover el +)
+        const ownerNumber = connection.integration.phone_number_id.replace('+', '');
+        // Extraer solo el número del remoteJid (antes del @)
+        const remoteNumber = message.key.remoteJid.split('@')[0];
+
+        // Verificar si el mensaje es del dueño usando fromMe y comparando números
+        const isFromOwner = message.key.fromMe && remoteNumber === ownerNumber;
 
         logger.info({
             fromMe: message.key.fromMe,
-            remoteJid: message.key.remoteJid,
-            ownerId: connection.userInfo.id,
+            remoteNumber,
+            ownerNumber,
             isFromOwner
         }, 'Verificando si el mensaje es del dueño');
 
