@@ -859,17 +859,23 @@ class MultiWhatsAppService {
 
         // Extraer solo el número del phone_number_id (remover el +)
         const ownerNumber = connection.integration.phone_number_id.replace('+', '');
-        // Extraer solo el número del remoteJid (antes del @)
-        const remoteNumber = message.key.remoteJid.split('@')[0];
+        
+        // Si el mensaje es nuestro (fromMe), usar el ID del usuario
+        const senderNumber = message.key.fromMe 
+            ? connection.userInfo.id.split(/[:@]/)[0]  // Extraer número del ID del usuario
+            : message.key.remoteJid.split('@')[0];     // Extraer número del remoteJid
 
         // Verificar si el mensaje es del dueño usando fromMe y comparando números
-        const isFromOwner = message.key.fromMe && remoteNumber === ownerNumber;
+        const isFromOwner = message.key.fromMe && senderNumber === ownerNumber;
 
         logger.info({
             fromMe: message.key.fromMe,
-            remoteNumber,
+            senderNumber,
             ownerNumber,
-            isFromOwner
+            isFromOwner,
+            phone_number_id: connection.integration.phone_number_id,
+            userInfoId: connection.userInfo.id,
+            remoteJid: message.key.remoteJid
         }, 'Verificando si el mensaje es del dueño');
 
         if (isFromOwner) {
