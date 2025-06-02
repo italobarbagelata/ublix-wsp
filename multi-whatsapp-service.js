@@ -121,6 +121,11 @@ class MultiWhatsAppService {
         this.qrCodes = new Map(); // Map to store QR codes
         this.supabase = supabase; // Expose supabase instance
         this.processedMessageIds = new Map(); // Map to store processed message IDs
+        this.reconnectionAttempts = new Map(); // Track reconnection attempts per integration
+        this.reconnectionTimers = new Map(); // Track active reconnection timers
+        this.maxReconnectionAttempts = 5; // Maximum reconnection attempts
+        this.baseReconnectionDelay = 5000; // Base delay: 5 seconds
+        this.maxReconnectionDelay = 300000; // Max delay: 5 minutes
         
         // Configurar limpieza periódica de mensajes procesados
         this.setupMessageCleanupInterval();
@@ -351,6 +356,8 @@ class MultiWhatsAppService {
                     });
                     
                     if (qr) {
+                        // Reset reconnection attempts when QR is received (indicates fresh session)
+                        this.reconnectionAttempts.delete(id);
                         logWithContext('info', 'Código QR recibido', {
                             integrationId: id
                         });
@@ -359,55 +366,143 @@ class MultiWhatsAppService {
                     
                     if (connection === 'close') {
                         const statusCode = lastDisconnect?.error?.output?.statusCode;
-                        const shouldReconnect = (
-                            lastDisconnect?.error instanceof Boom && 
-                            statusCode !== DisconnectReason.loggedOut
-                        );
+                        const errorMessage = lastDisconnect?.error?.message || 'Error desconocido';
+                        
+                        // Get current reconnection attempts for this integration
+                        const currentAttempts = this.reconnectionAttempts.get(id) || 0;
                         
                         logWithContext('warn', 'Conexión cerrada', {
                             integrationId: id,
                             statusCode,
-                            shouldReconnect,
-                            error: lastDisconnect?.error?.message || 'Error desconocido'
+                            errorMessage,
+                            currentAttempts,
+                            maxAttempts: this.maxReconnectionAttempts
                         });
                         
-                        if (shouldReconnect) {
-                            logWithContext('info', 'Intentando reconexión', {
-                                integrationId: id
-                            });
-                            setTimeout(() => this.createConnection(integration), 5000);
-                        } else {
-                            logWithContext('error', 'Conexión cerrada permanentemente', {
+                        // Handle specific error codes
+                        if (statusCode === DisconnectReason.loggedOut) {
+                            logWithContext('info', 'Usuario cerró sesión desde el teléfono - eliminando archivos de sesión', {
                                 integrationId: id,
                                 phoneNumberId: phone_number_id
                             });
-                            await this.updateIntegrationStatus(id, 'disconnected');
                             
-                            if (lastDisconnect.error?.output?.statusCode === DisconnectReason.loggedOut) {
-                                logWithContext('info', 'Eliminando archivos de sesión', {
+                            await this.cleanupConnection(id, sessionDir, 'logged_out');
+                            return;
+                        }
+                        
+                        // Handle 403 errors with special logic
+                        if (statusCode === 403) {
+                            logWithContext('warn', 'Error 403 detectado - posible sesión corrupta o expirada', {
+                                integrationId: id,
+                                phoneNumberId: phone_number_id,
+                                currentAttempts
+                            });
+                            
+                            // If we've had multiple 403 errors, clean session files
+                            if (currentAttempts >= 2) {
+                                logWithContext('info', 'Múltiples errores 403 - limpiando archivos de sesión corruptos', {
                                     integrationId: id,
-                                    phoneNumberId: phone_number_id
+                                    phoneNumberId: phone_number_id,
+                                    attempts: currentAttempts
                                 });
+                                
                                 try {
-                                    fs.rmSync(sessionDir, { recursive: true, force: true });
-                                } catch (error) {
+                                    if (fs.existsSync(sessionDir)) {
+                                        fs.rmSync(sessionDir, { recursive: true, force: true });
+                                        logWithContext('info', 'Archivos de sesión eliminados exitosamente', {
+                                            integrationId: id,
+                                            sessionDir
+                                        });
+                                    }
+                                    
+                                    // Reset reconnection attempts after cleaning
+                                    this.reconnectionAttempts.delete(id);
+                                } catch (cleanupError) {
                                     logWithContext('error', 'Error al eliminar archivos de sesión', {
-                                        err: error,
+                                        err: cleanupError,
                                         integrationId: id,
-                                        phoneNumberId: phone_number_id
+                                        sessionDir
                                     });
                                 }
                             }
+                        }
+                        
+                        // Check if we should attempt reconnection
+                        const shouldReconnect = (
+                            lastDisconnect?.error instanceof Boom && 
+                            statusCode !== DisconnectReason.loggedOut &&
+                            currentAttempts < this.maxReconnectionAttempts
+                        );
+                        
+                        if (shouldReconnect) {
+                            // Increment reconnection attempts
+                            this.reconnectionAttempts.set(id, currentAttempts + 1);
                             
-                            this.connections.delete(id);
+                            // Calculate exponential backoff delay
+                            const delay = Math.min(
+                                this.baseReconnectionDelay * Math.pow(2, currentAttempts),
+                                this.maxReconnectionDelay
+                            );
+                            
+                            logWithContext('info', 'Programando reconexión con backoff exponencial', {
+                                integrationId: id,
+                                attempt: currentAttempts + 1,
+                                maxAttempts: this.maxReconnectionAttempts,
+                                delayMs: delay,
+                                delaySeconds: Math.round(delay / 1000)
+                            });
+                            
+                            // Clear any existing timer for this integration
+                            const existingTimer = this.reconnectionTimers.get(id);
+                            if (existingTimer) {
+                                clearTimeout(existingTimer);
+                            }
+                            
+                            // Set new reconnection timer
+                            const timer = setTimeout(async () => {
+                                this.reconnectionTimers.delete(id);
+                                
+                                logWithContext('info', 'Ejecutando reconexión programada', {
+                                    integrationId: id,
+                                    attempt: currentAttempts + 1
+                                });
+                                
+                                await this.createConnection(integration);
+                            }, delay);
+                            
+                            this.reconnectionTimers.set(id, timer);
+                            
+                            // Update status to indicate reconnection is scheduled
+                            await this.updateIntegrationStatus(id, 'reconnecting');
+                        } else {
+                            // Max attempts reached or permanent error
+                            if (currentAttempts >= this.maxReconnectionAttempts) {
+                                logWithContext('error', 'Máximo de intentos de reconexión alcanzado', {
+                                    integrationId: id,
+                                    phoneNumberId: phone_number_id,
+                                    attempts: currentAttempts
+                                });
+                            }
+                            
+                            await this.cleanupConnection(id, sessionDir, 'connection_failed');
                         }
                     }
                     
                     if (connection === 'open') {
+                        // Reset reconnection attempts on successful connection
+                        this.reconnectionAttempts.delete(id);
+                        
+                        // Clear any pending reconnection timer
+                        const existingTimer = this.reconnectionTimers.get(id);
+                        if (existingTimer) {
+                            clearTimeout(existingTimer);
+                            this.reconnectionTimers.delete(id);
+                        }
+                        
                         // Obtener información del usuario conectado
                         const userInfo = sock.user || {};
                         
-                        logWithContext('info', 'Conectado a WhatsApp', {
+                        logWithContext('info', 'Conectado a WhatsApp exitosamente', {
                             integrationId: id,
                             phoneNumberId: phone_number_id,
                             userInfo: {
@@ -1087,17 +1182,9 @@ class MultiWhatsAppService {
         logger.info(`Removing WhatsApp connection for ${connection.integration.phone_number_id} (${integrationId})`);
         
         try {
-            // Close the socket properly if possible
-            if (connection.sock) {
-                // Baileys doesn't have a formal way to close connections,
-                // but we can remove listeners to allow garbage collection
-                connection.sock.ev.removeAllListeners();
-            }
-            
-            // Remove from our connections map
-            this.connections.delete(integrationId);
-            
-            return true;
+            // Use the centralized cleanup method
+            const success = await this.cleanupConnection(integrationId, connection.sessionDir, 'manual');
+            return success;
         } catch (error) {
             logger.error(`Error removing connection for ${integrationId}:`, error);
             return false;
@@ -1254,6 +1341,14 @@ class MultiWhatsAppService {
             this.messageCleanupInterval = null;
         }
         
+        // Clear all reconnection timers
+        for (const [integrationId, timer] of this.reconnectionTimers.entries()) {
+            clearTimeout(timer);
+            logger.info(`Cleared reconnection timer for integration ${integrationId}`);
+        }
+        this.reconnectionTimers.clear();
+        this.reconnectionAttempts.clear();
+        
         // Unsubscribe from realtime channel
         if (this.realtimeChannel) {
             await this.realtimeChannel.unsubscribe();
@@ -1275,6 +1370,153 @@ class MultiWhatsAppService {
         }
         
         logger.info('WhatsApp service shutdown complete');
+    }
+
+    // Cleanup connection and related resources
+    async cleanupConnection(integrationId, sessionDir, reason = 'unknown') {
+        try {
+            logWithContext('info', 'Iniciando limpieza de conexión', {
+                integrationId,
+                reason,
+                sessionDir
+            });
+            
+            // Clear any pending reconnection timer
+            const existingTimer = this.reconnectionTimers.get(integrationId);
+            if (existingTimer) {
+                clearTimeout(existingTimer);
+                this.reconnectionTimers.delete(integrationId);
+                logWithContext('info', 'Timer de reconexión cancelado', { integrationId });
+            }
+            
+            // Clear reconnection attempts
+            this.reconnectionAttempts.delete(integrationId);
+            
+            // Update status in database
+            const statusMap = {
+                'logged_out': 'disconnected',
+                'connection_failed': 'error',
+                'manual': 'disconnected'
+            };
+            
+            const status = statusMap[reason] || 'disconnected';
+            await this.updateIntegrationStatus(integrationId, status);
+            
+            // Remove from connections map
+            if (this.connections.has(integrationId)) {
+                const connection = this.connections.get(integrationId);
+                
+                // Properly close socket if exists
+                if (connection.sock) {
+                    try {
+                        connection.sock.ev.removeAllListeners();
+                    } catch (error) {
+                        logWithContext('warn', 'Error al cerrar socket', {
+                            integrationId,
+                            err: error.message
+                        });
+                    }
+                }
+                
+                this.connections.delete(integrationId);
+            }
+            
+            // Remove session files if reason is logged_out or after multiple 403 errors
+            if (reason === 'logged_out' || reason === 'session_cleanup') {
+                try {
+                    if (sessionDir && fs.existsSync(sessionDir)) {
+                        fs.rmSync(sessionDir, { recursive: true, force: true });
+                        logWithContext('info', 'Archivos de sesión eliminados', {
+                            integrationId,
+                            sessionDir,
+                            reason
+                        });
+                    }
+                } catch (error) {
+                    logWithContext('error', 'Error al eliminar archivos de sesión', {
+                        integrationId,
+                        sessionDir,
+                        err: error.message
+                    });
+                }
+            }
+            
+            logWithContext('info', 'Limpieza de conexión completada', {
+                integrationId,
+                reason
+            });
+            
+            return true;
+        } catch (error) {
+            logWithContext('error', 'Error durante limpieza de conexión', {
+                integrationId,
+                reason,
+                err: error.message
+            });
+            return false;
+        }
+    }
+
+    // Manual method to clean corrupted sessions
+    async cleanCorruptedSessions() {
+        logger.info('Iniciando limpieza manual de sesiones corruptas...');
+        
+        const corruptedConnections = [];
+        
+        for (const [integrationId, connection] of this.connections.entries()) {
+            const attempts = this.reconnectionAttempts.get(integrationId) || 0;
+            
+            // Consider a connection corrupted if it has failed multiple times
+            if (attempts >= 3 || connection.status === 'error') {
+                corruptedConnections.push({
+                    integrationId,
+                    attempts,
+                    status: connection.status,
+                    phoneNumberId: connection.integration.phone_number_id
+                });
+            }
+        }
+        
+        logger.info(`Encontradas ${corruptedConnections.length} conexiones potencialmente corruptas`);
+        
+        for (const corrupt of corruptedConnections) {
+            logger.info(`Limpiando sesión corrupta: ${corrupt.phoneNumberId} (${corrupt.integrationId})`);
+            
+            const connection = this.connections.get(corrupt.integrationId);
+            if (connection) {
+                await this.cleanupConnection(corrupt.integrationId, connection.sessionDir, 'session_cleanup');
+                
+                // Attempt to recreate the connection after cleanup
+                setTimeout(async () => {
+                    logger.info(`Reintentando conexión limpia para ${corrupt.phoneNumberId}`);
+                    await this.createConnection(connection.integration);
+                }, 5000);
+            }
+        }
+        
+        return corruptedConnections;
+    }
+    
+    // Get reconnection statistics
+    getReconnectionStats() {
+        const stats = {
+            activeTimers: this.reconnectionTimers.size,
+            connectionsWithAttempts: this.reconnectionAttempts.size,
+            totalAttempts: 0,
+            connectionAttempts: []
+        };
+        
+        for (const [integrationId, attempts] of this.reconnectionAttempts.entries()) {
+            stats.totalAttempts += attempts;
+            stats.connectionAttempts.push({
+                integrationId,
+                attempts,
+                maxAttempts: this.maxReconnectionAttempts,
+                hasTimer: this.reconnectionTimers.has(integrationId)
+            });
+        }
+        
+        return stats;
     }
 }
 

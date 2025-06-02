@@ -629,6 +629,65 @@ app.post('/api/connections/:integrationId/logout', checkService, async (req, res
     }
 });
 
+/**
+ * @swagger
+ * /api/debug/reconnection-stats:
+ *   get:
+ *     summary: Obtener estadísticas de reconexión
+ *     description: Retorna información sobre intentos de reconexión activos
+ *     responses:
+ *       200:
+ *         description: Estadísticas de reconexión
+ *       503:
+ *         description: Servicio de WhatsApp no inicializado
+ */
+app.get('/api/debug/reconnection-stats', checkService, (req, res) => {
+    try {
+        const stats = whatsappService.getReconnectionStats();
+        res.json({
+            success: true,
+            stats
+        });
+    } catch (error) {
+        console.error('Error getting reconnection stats:', error);
+        res.status(500).json({
+            success: false,
+            message: 'Error getting reconnection stats',
+            error: error.message
+        });
+    }
+});
+
+/**
+ * @swagger
+ * /api/debug/clean-corrupted:
+ *   post:
+ *     summary: Limpiar sesiones corruptas
+ *     description: Identifica y limpia conexiones que han fallado múltiples veces
+ *     responses:
+ *       200:
+ *         description: Proceso de limpieza iniciado
+ *       503:
+ *         description: Servicio de WhatsApp no inicializado
+ */
+app.post('/api/debug/clean-corrupted', checkService, async (req, res) => {
+    try {
+        const corruptedConnections = await whatsappService.cleanCorruptedSessions();
+        res.json({
+            success: true,
+            message: 'Corrupted sessions cleanup initiated',
+            corruptedConnections
+        });
+    } catch (error) {
+        console.error('Error cleaning corrupted sessions:', error);
+        res.status(500).json({
+            success: false,
+            message: 'Error cleaning corrupted sessions',
+            error: error.message
+        });
+    }
+});
+
 // Configuración de Swagger
 const swaggerDocs = swaggerJsDoc(swaggerOptions);
 app.use('/api-docs', swaggerUi.serve, swaggerUi.setup(swaggerDocs));
