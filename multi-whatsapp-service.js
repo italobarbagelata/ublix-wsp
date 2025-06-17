@@ -1097,9 +1097,9 @@ class MultiWhatsAppService {
                     message: messageContent,
                     project_id: integration.project_id,
                     user_id: senderJid,
-                    source: integration.id,
+                    source_id: integration.id,
                     number_phone_agent: integration.phone_number_id,
-                    source_name: 'whatsapp_web',
+                    source: 'whatsapp_web',
                     name: 'whatsapp_web'
                 })
             });
