@@ -1080,6 +1080,20 @@ class MultiWhatsAppService {
         }, 'Nuevo mensaje válido recibido');
         
         try {
+            // Log de los valores de FormData antes de enviar
+            logger.info({
+                integrationId,
+                formData: {
+                    message: messageContent,
+                    project_id: integration.project_id,
+                    user_id: senderJid,
+                    source_id: integration.id,
+                    number_phone_agent: integration.phone_number_id,
+                    source: 'whatsapp_web',
+                    name: 'whatsapp_web'
+                }
+            }, 'Valores de FormData a enviar a la API de Ublix');
+            
             // Log before API call
             logger.info({
                 integrationId,
