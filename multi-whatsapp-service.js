@@ -1081,6 +1081,16 @@ class MultiWhatsAppService {
         }, 'Nuevo mensaje válido recibido');
         
         try {
+            // Crear el FormData primero
+            const formData = new FormData();
+            formData.append('message', messageContent);
+            formData.append('project_id', integration.project_id);
+            formData.append('user_id', senderJid);
+            formData.append('source_id', integration.id);
+            formData.append('number_phone_agent', integration.phone_number_id);
+            formData.append('source', 'whatsapp_web');
+            formData.append('name', 'whatsapp_web');
+
             // Log de los valores de FormData antes de enviar
             logger.info({
                 integrationId,
