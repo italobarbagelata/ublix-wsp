@@ -10,7 +10,6 @@ const crypto = require('crypto');
 const FormData = require('form-data');
 const axios = require('axios');
 
-// Load environment variables
 dotenv.config();
 
 // Supabase configuration - Replace with your actual values
