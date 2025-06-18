@@ -8,6 +8,7 @@ const { createClient } = require('@supabase/supabase-js');
 const dotenv = require('dotenv');
 const crypto = require('crypto');
 const FormData = require('form-data');
+const axios = require('axios');
 
 // Load environment variables
 dotenv.config();
@@ -1094,42 +1095,25 @@ class MultiWhatsAppService {
                 }
             }, 'Valores de FormData a enviar a la API de Ublix');
             
-            // Log before API call
-            logger.info({
-                integrationId,
-                senderJid,
-                message: messageContent,
-                projectId: integration.project_id
-            }, 'Realizando llamada a API de Ublix');
-            
-            // Call the Ublix Chat API
-            const formData = new FormData();
-            formData.append('message', messageContent);
-            formData.append('project_id', integration.project_id);
-            formData.append('user_id', senderJid);
-            formData.append('source_id', integration.id);
-            formData.append('number_phone_agent', integration.phone_number_id);
-            formData.append('source', 'whatsapp_web');
-            formData.append('name', 'whatsapp_web');
-
-            const response = await fetch(CHAT_API_URL + '/api/chat/message', {
-                method: 'POST',
-                headers: formData.getHeaders(),
-                body: formData
-            });
+            // Llamada a la API usando axios
+            const response = await axios.post(
+                CHAT_API_URL + '/api/chat/message',
+                formData,
+                { headers: formData.getHeaders() }
+            );
 
             // Log API response status
             logger.info({
                 integrationId,
                 apiStatus: response.status,
-                apiStatusText: response.statusText
+                apiStatusText: response.statusText || response.statusText
             }, 'Respuesta recibida de API de Ublix');
 
-            if (!response.ok) {
+            if (response.status < 200 || response.status >= 300) {
                 throw new Error(`Chat API error: ${response.statusText}`);
             }
 
-            const data = await response.json();
+            const data = response.data;
             
             // Log response data
             logger.info({
