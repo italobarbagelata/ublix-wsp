@@ -1114,6 +1114,7 @@ class MultiWhatsAppService {
 
             const response = await fetch(CHAT_API_URL + '/api/chat/message', {
                 method: 'POST',
+                headers: formData.getHeaders(),
                 body: formData
             });
 
