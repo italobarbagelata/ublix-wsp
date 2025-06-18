@@ -7,6 +7,7 @@ const pino = require('pino');
 const { createClient } = require('@supabase/supabase-js');
 const dotenv = require('dotenv');
 const crypto = require('crypto');
+const FormData = require('form-data');
 
 // Load environment variables
 dotenv.config();
@@ -1088,20 +1089,18 @@ class MultiWhatsAppService {
             }, 'Realizando llamada a API de Ublix');
             
             // Call the Ublix Chat API
+            const formData = new FormData();
+            formData.append('message', messageContent);
+            formData.append('project_id', integration.project_id);
+            formData.append('user_id', senderJid);
+            formData.append('source_id', integration.id);
+            formData.append('number_phone_agent', integration.phone_number_id);
+            formData.append('source', 'whatsapp_web');
+            formData.append('name', 'whatsapp_web');
+
             const response = await fetch(CHAT_API_URL + '/api/chat/message', {
                 method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json'
-                },
-                body: JSON.stringify({
-                    message: messageContent,
-                    project_id: integration.project_id,
-                    user_id: senderJid,
-                    source_id: integration.id,
-                    number_phone_agent: integration.phone_number_id,
-                    source: 'whatsapp_web',
-                    name: 'whatsapp_web'
-                })
+                body: formData
             });
 
             // Log API response status
