@@ -9,6 +9,7 @@ const dotenv = require('dotenv');
 const crypto = require('crypto');
 const FormData = require('form-data');
 const axios = require('axios');
+const { v4: uuidv4 } = require('uuid');
 
 dotenv.config();
 
@@ -114,6 +115,115 @@ try {
 
 logger.info(`BASE_SESSION_DIR: ${BASE_SESSION_DIR}`);
 logger.info(`Directory exists: ${fs.existsSync(BASE_SESSION_DIR)}`);
+
+// Clase para manejar el almacenamiento de archivos en Supabase
+class FileStorage {
+    constructor() {
+        this.supabase = supabase;
+    }
+    
+    _generateFilename(originalFilename) {
+        const fileExtension = originalFilename ? originalFilename.split('.').pop() : 'jpg';
+        const timestamp = new Date().toISOString().replace(/[:.]/g, '-').split('T')[0];
+        const uniqueId = uuidv4();
+        return `${timestamp}_${uniqueId}.${fileExtension}`;
+    }
+    
+    async saveImage(projectId, imageBuffer, contentType = 'image/jpeg', originalFilename = 'image.jpg') {
+        try {
+            const bucketName = 'imagenes';
+            
+            // Generar nombre único para el archivo
+            const filename = this._generateFilename(originalFilename);
+            
+            // Crear ruta con estructura: project_id/YYYY/MM/DD/filename
+            const currentDate = new Date();
+            const filePath = `${projectId}/${currentDate.getFullYear()}/${String(currentDate.getMonth() + 1).padStart(2, '0')}/${String(currentDate.getDate()).padStart(2, '0')}/${filename}`;
+            
+            // Verificar si el bucket existe
+            const { data: buckets, error: bucketsError } = await this.supabase.storage.listBuckets();
+            if (bucketsError) {
+                throw new Error(`Error al listar buckets: ${bucketsError.message}`);
+            }
+            
+            const bucketExists = buckets.some(bucket => bucket.name === bucketName);
+            
+            if (!bucketExists) {
+                logger.info(`Creando bucket: ${bucketName}`);
+                const { error: createError } = await this.supabase.storage.createBucket(bucketName, {
+                    public: false,
+                    fileSizeLimit: 52428800, // 50MB
+                    allowedMimeTypes: ['image/jpeg', 'image/png', 'image/gif', 'image/webp']
+                });
+                
+                if (createError) {
+                    throw new Error(`Error al crear bucket: ${createError.message}`);
+                }
+            }
+            
+            // Subir archivo
+            const { error: uploadError } = await this.supabase.storage
+                .from(bucketName)
+                .upload(filePath, imageBuffer, {
+                    contentType: contentType,
+                    cacheControl: '3600',
+                    upsert: true
+                });
+            
+            if (uploadError) {
+                throw new Error(`Error al subir imagen: ${uploadError.message}`);
+            }
+            
+            // Obtener URL pública
+            const { data: urlData } = this.supabase.storage
+                .from(bucketName)
+                .getPublicUrl(filePath);
+            
+            logger.info(`Imagen guardada en Supabase: ${urlData.publicUrl}`);
+            return urlData.publicUrl;
+            
+        } catch (error) {
+            logger.error(`Error al guardar imagen: ${error.message}`);
+            throw error;
+        }
+    }
+    
+    async deleteImage(projectId, filename) {
+        try {
+            const bucketName = 'imagenes';
+            const filePath = `${projectId}/${filename}`;
+            
+            const { error } = await this.supabase.storage
+                .from(bucketName)
+                .remove([filePath]);
+            
+            if (error) {
+                throw new Error(`Error al eliminar imagen: ${error.message}`);
+            }
+            
+            return true;
+        } catch (error) {
+            logger.error(`Error al eliminar imagen: ${error.message}`);
+            return false;
+        }
+    }
+    
+    async getImageUrl(projectId, filename) {
+        try {
+            const bucketName = 'imagenes';
+            const filePath = `${projectId}/${filename}`;
+            
+            const { data } = this.supabase.storage
+                .from(bucketName)
+                .getPublicUrl(filePath);
+            
+            return data.publicUrl;
+        } catch (error) {
+            logger.error(`Error al obtener URL de imagen: ${error.message}`);
+            throw error;
+        }
+    }
+}
 
 // Class to manage multiple WhatsApp connections
 class MultiWhatsAppService {
@@ -1080,27 +1190,90 @@ class MultiWhatsAppService {
         }, 'Nuevo mensaje válido recibido');
         
         try {
+            let finalMessage = messageContent;
+            let imageUrl = null;
+            
+            // Procesar imagen si existe
+            if (message.message?.imageMessage) {
+                try {
+                    logger.info({
+                        integrationId,
+                        senderJid,
+                        hasImage: true
+                    }, 'Procesando imagen recibida');
+                    
+                    // Obtener la imagen del mensaje
+                    const imageMessage = message.message.imageMessage;
+                    const imageBuffer = await connection.sock.downloadMediaMessage(message);
+                    
+                    if (imageBuffer) {
+                        // Crear instancia de FileStorage
+                        const fileStorage = new FileStorage();
+                        
+                        // Guardar imagen en Supabase
+                        imageUrl = await fileStorage.saveImage(
+                            integration.project_id,
+                            imageBuffer,
+                            'image/jpeg',
+                            `whatsapp_image_${messageId}.jpg`
+                        );
+                        
+                        logger.info({
+                            integrationId,
+                            senderJid,
+                            imageUrl
+                        }, 'Imagen guardada exitosamente en Supabase');
+                        
+                        // Construir mensaje markdown para el bot
+                        finalMessage = `![Imagen](${imageUrl})`;
+                        
+                        // Si hay caption, agregarlo al mensaje
+                        if (imageMessage.caption) {
+                            finalMessage += `\n\n${imageMessage.caption}`;
+                        }
+                    } else {
+                        logger.warn({
+                            integrationId,
+                            senderJid
+                        }, 'No se pudo descargar la imagen del mensaje');
+                    }
+                } catch (imageError) {
+                    logger.error({
+                        integrationId,
+                        senderJid,
+                        err: imageError
+                    }, 'Error procesando imagen');
+                    // Continuar con el mensaje original si falla el procesamiento de imagen
+                }
+            }
+            
             // Crear el FormData primero
             const formData = new FormData();
-            formData.append('message', messageContent);
+            formData.append('message', finalMessage);
             formData.append('project_id', integration.project_id);
             formData.append('user_id', senderJid);
             formData.append('source_id', integration.id);
             formData.append('number_phone_agent', integration.phone_number_id);
             formData.append('source', 'whatsapp_web');
             formData.append('name', 'whatsapp_web');
+            
+            // Si hay imagen, agregar la URL al FormData
+            if (imageUrl) {
+                formData.append('image_url', imageUrl);
+            }
 
             // Log de los valores de FormData antes de enviar
             logger.info({
                 integrationId,
                 formData: {
-                    message: messageContent,
+                    message: finalMessage,
                     project_id: integration.project_id,
                     user_id: senderJid,
                     source_id: integration.id,
                     number_phone_agent: integration.phone_number_id,
                     source: 'whatsapp_web',
-                    name: 'whatsapp_web'
+                    name: 'whatsapp_web',
+                    image_url: imageUrl
                 }
             }, 'Valores de FormData a enviar a la API de Ublix');
             
