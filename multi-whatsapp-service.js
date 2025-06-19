@@ -1,4 +1,4 @@
-const { default: makeWASocket, DisconnectReason, useMultiFileAuthState } = require('@whiskeysockets/baileys');
+const { default: makeWASocket, DisconnectReason, useMultiFileAuthState, downloadMediaMessage } = require('@whiskeysockets/baileys');
 const { Boom } = require('@hapi/boom');
 const qrcode = require('qrcode-terminal');
 const fs = require('fs');
@@ -1204,7 +1204,10 @@ class MultiWhatsAppService {
                     
                     // Obtener la imagen del mensaje
                     const imageMessage = message.message.imageMessage;
-                    const imageBuffer = await connection.sock.downloadMediaMessage(message);
+                    const imageBuffer = await downloadMediaMessage(message, 'buffer', {}, {
+                        logger: logger,
+                        reuploadRequest: connection.sock.updateMediaMessage
+                    });
                     
                     if (imageBuffer) {
                         // Crear instancia de FileStorage
