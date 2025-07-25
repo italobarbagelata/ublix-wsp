@@ -501,17 +501,18 @@ class MultiWhatsAppService {
                             return;
                         }
                         
-                        // Handle 403 errors with special logic
-                        if (statusCode === 403) {
-                            logWithContext('warn', 'Error 403 detectado - posible sesión corrupta o expirada', {
+                        // Handle 403 and 405 errors with special logic
+                        if (statusCode === 403 || statusCode === 405) {
+                            logWithContext('warn', `Error ${statusCode} detectado - posible sesión corrupta o problema de conexión`, {
                                 integrationId: id,
                                 phoneNumberId: phone_number_id,
-                                currentAttempts
+                                currentAttempts,
+                                errorMessage: lastDisconnect?.error?.message
                             });
                             
-                            // If we've had multiple 403 errors, clean session files
+                            // If we've had multiple 403/405 errors, clean session files
                             if (currentAttempts >= 2) {
-                                logWithContext('info', 'Múltiples errores 403 - limpiando archivos de sesión corruptos', {
+                                logWithContext('info', `Múltiples errores ${statusCode} - limpiando archivos de sesión corruptos`, {
                                     integrationId: id,
                                     phoneNumberId: phone_number_id,
                                     attempts: currentAttempts
@@ -1326,15 +1327,30 @@ class MultiWhatsAppService {
                 messageId: data.message_id
             }, 'Message processed successfully');
         } catch (error) {
-            logger.error({
+            // Agregar más detalles del error para debug
+            const errorDetails = {
                 err: error,
                 integrationId,
                 sender: senderJid,
                 message: messageContent,
                 errorName: error.name,
                 errorMessage: error.message,
-                errorStack: error.stack
-            }, 'Error processing message');
+                errorStack: error.stack,
+                // Detalles adicionales si es error de axios
+                ...(error.response && {
+                    responseStatus: error.response.status,
+                    responseStatusText: error.response.statusText,
+                    responseData: error.response.data,
+                    responseHeaders: error.response.headers
+                }),
+                ...(error.config && {
+                    requestUrl: error.config.url,
+                    requestMethod: error.config.method,
+                    requestHeaders: error.config.headers
+                })
+            };
+            
+            logger.error(errorDetails, 'Error processing message');
             
             // Intentar enviar un mensaje de error al usuario
             try {
