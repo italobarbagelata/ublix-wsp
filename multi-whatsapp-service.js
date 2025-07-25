@@ -238,6 +238,12 @@ class MultiWhatsAppService {
         this.baseReconnectionDelay = 5000; // Base delay: 5 seconds
         this.maxReconnectionDelay = 300000; // Max delay: 5 minutes
         
+        // Circuit breaker para evitar loops infinitos
+        this.lastFailureTime = new Map(); // Track last failure time per integration
+        this.circuitBreakerDelay = 5 * 60 * 1000; // 5 minutos de cooldown mínimo
+        this.globalErrorCount = 0; // Contador global de errores
+        this.lastGlobalReset = Date.now(); // Último reset global
+        
         // Configurar limpieza periódica de mensajes procesados
         this.setupMessageCleanupInterval();
     }
@@ -539,11 +545,48 @@ class MultiWhatsAppService {
                             }
                         }
                         
+                        // Circuit breaker: verificar si hay demasiados errores recientes
+                        const now = Date.now();
+                        const lastFailure = this.lastFailureTime.get(id) || 0;
+                        const timeSinceLastFailure = now - lastFailure;
+                        
+                        // Actualizar estadísticas globales de errores
+                        this.globalErrorCount++;
+                        this.lastFailureTime.set(id, now);
+                        
+                        // Reset global counter cada 10 minutos
+                        if (now - this.lastGlobalReset > 10 * 60 * 1000) {
+                            this.globalErrorCount = 0;
+                            this.lastGlobalReset = now;
+                        }
+                        
+                        // Circuit breaker: si hay demasiados errores globales, parar todo
+                        const isGlobalCircuitOpen = this.globalErrorCount > 20; // Más de 20 errores en 10 min
+                        const isLocalCircuitOpen = timeSinceLastFailure < this.circuitBreakerDelay; // Menos de 5 min desde último fallo
+                        
+                        if (isGlobalCircuitOpen) {
+                            logWithContext('error', 'Circuit breaker global activado - demasiados errores', {
+                                integrationId: id,
+                                globalErrorCount: this.globalErrorCount,
+                                timeWindowMinutes: 10
+                            });
+                        }
+                        
+                        if (isLocalCircuitOpen) {
+                            logWithContext('warn', 'Circuit breaker local activado - cooldown activo', {
+                                integrationId: id,
+                                timeSinceLastFailureMs: timeSinceLastFailure,
+                                circuitBreakerDelayMs: this.circuitBreakerDelay
+                            });
+                        }
+                        
                         // Check if we should attempt reconnection
                         const shouldReconnect = (
                             lastDisconnect?.error instanceof Boom && 
                             statusCode !== DisconnectReason.loggedOut &&
-                            currentAttempts < this.maxReconnectionAttempts
+                            currentAttempts < this.maxReconnectionAttempts &&
+                            !isGlobalCircuitOpen &&
+                            !isLocalCircuitOpen
                         );
                         
                         if (shouldReconnect) {
@@ -587,13 +630,28 @@ class MultiWhatsAppService {
                             // Update status to indicate reconnection is scheduled
                             await this.updateIntegrationStatus(id, 'reconnecting');
                         } else {
-                            // Max attempts reached or permanent error
+                            // Max attempts reached, permanent error, or circuit breaker activated
                             if (currentAttempts >= this.maxReconnectionAttempts) {
                                 logWithContext('error', 'Máximo de intentos de reconexión alcanzado', {
                                     integrationId: id,
                                     phoneNumberId: phone_number_id,
                                     attempts: currentAttempts
                                 });
+                            } else if (isGlobalCircuitOpen) {
+                                logWithContext('error', 'Reconexión bloqueada por circuit breaker global', {
+                                    integrationId: id,
+                                    phoneNumberId: phone_number_id,
+                                    globalErrorCount: this.globalErrorCount
+                                });
+                            } else if (isLocalCircuitOpen) {
+                                logWithContext('warn', 'Reconexión bloqueada por circuit breaker local', {
+                                    integrationId: id,
+                                    phoneNumberId: phone_number_id,
+                                    cooldownRemainingMs: this.circuitBreakerDelay - timeSinceLastFailure
+                                });
+                                // No cleanup for local circuit breaker - just wait
+                                await this.updateIntegrationStatus(id, 'error');
+                                return;
                             }
                             
                             await this.cleanupConnection(id, sessionDir, 'connection_failed');

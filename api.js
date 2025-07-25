@@ -688,6 +688,70 @@ app.post('/api/debug/clean-corrupted', checkService, async (req, res) => {
     }
 });
 
+/**
+ * @swagger
+ * /api/debug/circuit-breaker:
+ *   get:
+ *     summary: Obtener estado del circuit breaker
+ *     description: Retorna información sobre el estado del circuit breaker global y local
+ *     responses:
+ *       200:
+ *         description: Estado del circuit breaker
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 success:
+ *                   type: boolean
+ *                 circuitBreakerStatus:
+ *                   type: object
+ *       503:
+ *         description: Servicio de WhatsApp no inicializado
+ */
+app.get('/api/debug/circuit-breaker', checkService, (req, res) => {
+    try {
+        const now = Date.now();
+        const circuitBreakerStatus = {
+            globalErrorCount: whatsappService.globalErrorCount,
+            lastGlobalReset: whatsappService.lastGlobalReset,
+            timeSinceLastReset: now - whatsappService.lastGlobalReset,
+            isGlobalCircuitOpen: whatsappService.globalErrorCount > 20,
+            circuitBreakerDelayMs: whatsappService.circuitBreakerDelay,
+            activeConnections: whatsappService.connections.size,
+            connectionStates: []
+        };
+
+        // Add status for each connection
+        for (const [integrationId, connection] of whatsappService.connections.entries()) {
+            const lastFailure = whatsappService.lastFailureTime.get(integrationId) || 0;
+            const timeSinceLastFailure = now - lastFailure;
+            const isLocalCircuitOpen = timeSinceLastFailure < whatsappService.circuitBreakerDelay;
+            
+            circuitBreakerStatus.connectionStates.push({
+                integrationId,
+                lastFailureTime: lastFailure,
+                timeSinceLastFailureMs: timeSinceLastFailure,
+                isLocalCircuitOpen,
+                reconnectionAttempts: whatsappService.reconnectionAttempts.get(integrationId) || 0,
+                hasActiveTimer: whatsappService.reconnectionTimers.has(integrationId)
+            });
+        }
+
+        res.json({
+            success: true,
+            circuitBreakerStatus
+        });
+    } catch (error) {
+        console.error('Error getting circuit breaker status:', error);
+        res.status(500).json({
+            success: false,
+            message: 'Error getting circuit breaker status',
+            error: error.message
+        });
+    }
+});
+
 // Configuración de Swagger
 const swaggerDocs = swaggerJsDoc(swaggerOptions);
 app.use('/api-docs', swaggerUi.serve, swaggerUi.setup(swaggerDocs));
