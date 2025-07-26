@@ -2,6 +2,10 @@
   "name": "whatsapp-baileys-api",
   "version": "1.0.0",
   "main": "main.js",
+  "engines": {
+    "node": "18.x",
+    "npm": ">=9.0.0"
+  },
   "scripts": {
     "start": "NODE_ENV=production node main.js",
     "dev": "NODE_ENV=development node main.js | pino-pretty",
@@ -19,7 +23,7 @@
   "dependencies": {
     "@hapi/boom": "^10.0.1",
     "@supabase/supabase-js": "^2.38.4",
-    "@whiskeysockets/baileys": "^6.4.0",
+    "@whiskeysockets/baileys": "^6.7.18",
     "body-parser": "^1.20.3",
     "cors": "^2.8.5",
     "dotenv": "^16.3.1",
