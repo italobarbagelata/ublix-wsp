@@ -1125,17 +1125,18 @@ class MultiWhatsAppService {
         // Extraer solo el número del phone_number_id (remover el +)
         const ownerNumber = connection.integration.phone_number_id.replace('+', '');
         
-        // Si el mensaje es nuestro (fromMe), usar el ID del usuario
-        const senderNumber = message.key.fromMe 
-            ? connection.userInfo.id.split(/[:@]/)[0]  // Extraer número del ID del usuario
-            : message.key.remoteJid.split('@')[0];     // Extraer número del remoteJid
+        // Para mensajes enviados (fromMe=true), el remoteJid es el destinatario
+        // Para mensajes recibidos (fromMe=false), el remoteJid es el remitente
+        const actualSenderNumber = message.key.fromMe 
+            ? connection.userInfo.id.split(/[:@]/)[0]  // Si es nuestro mensaje, usar nuestro número
+            : message.key.remoteJid.split('@')[0];     // Si es mensaje recibido, usar el número del remitente
 
-        // Verificar si el mensaje es del dueño usando fromMe y comparando números
-        const isFromOwner = message.key.fromMe && senderNumber === ownerNumber;
+        // Un mensaje es del dueño solo si fromMe es true
+        const isFromOwner = message.key.fromMe;
 
         logger.info({
             fromMe: message.key.fromMe,
-            senderNumber,
+            actualSenderNumber,
             ownerNumber,
             isFromOwner,
             phone_number_id: connection.integration.phone_number_id,
