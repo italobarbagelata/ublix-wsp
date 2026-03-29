@@ -41,4 +41,4 @@ next-env.d.ts
 /auth_session/
 
 # logs
-*.log 
+*.log .env
