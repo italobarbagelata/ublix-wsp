@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Información del Proyecto
 
-Este es un servicio de API REST para manejar múltiples conexiones de WhatsApp Web usando la librería Baileys. Está integrado con Supabase para persistencia de datos y optimizado para despliegue en Azure Web App.
+Este es un servicio de API REST para manejar múltiples conexiones de WhatsApp Web usando la librería Baileys. Usa PostgreSQL (pg) para persistencia de datos y optimizado para despliegue en Azure Web App.
 
 ## Comandos Principales
 
@@ -31,8 +31,8 @@ npm test            # No hay tests implementados (retorna 0)
    - Múltiples conexiones WhatsApp simultáneas
    - Reconexión automática con backoff exponencial
    - Limpieza de sesiones corruptas
-   - Sincronización con Supabase
-   - Gestión de imágenes en Supabase Storage
+   - Sincronización con PostgreSQL
+   - Gestión de imágenes en almacenamiento local
    
 3. **api.js**: Define todos los endpoints REST:
    - Gestión de conexiones (`/api/connections/*`)
@@ -40,12 +40,14 @@ npm test            # No hay tests implementados (retorna 0)
    - Endpoints de debug (`/api/debug/*`)
    - Documentación Swagger en `/api-docs`
 
-### Base de Datos (Supabase)
+### Base de Datos (PostgreSQL via pg)
+
+Módulo de conexión: `db.js` (Pool de conexiones con `pg`)
 
 Tabla principal: `integration_whatsapp_web`
 - Almacena configuración y estado de cada conexión WhatsApp
 - Se sincroniza automáticamente con el estado de las conexiones
-- Listener en tiempo real para cambios en la base de datos
+- Listener via PostgreSQL LISTEN/NOTIFY para cambios en la base de datos
 
 ### Gestión de Sesiones
 
@@ -56,11 +58,11 @@ Tabla principal: `integration_whatsapp_web`
 ## Variables de Entorno Requeridas
 
 ```env
-SUPABASE_URL=<url de tu proyecto Supabase>
-SUPABASE_KEY=<clave anon/service de Supabase>
+DATABASE_URL=postgresql://user:password@host:5432/dbname
 CHAT_API_URL=<URL de API para procesar mensajes entrantes>
 PORT=3002
 NODE_ENV=development|production
+FILE_STORAGE_DIR=./uploads
 ```
 
 ## Despliegue en Azure
@@ -100,9 +102,9 @@ El proyecto incluye configuración específica para Azure:
   - `sendImage()`: Envía imágenes
   - `getActiveConnections()`: Lista conexiones activas
 
-### SupabaseImageService
-- Gestión de imágenes en Supabase Storage
-- Buckets por proyecto
+### FileStorage
+- Gestión de imágenes en almacenamiento local (disco)
+- Estructura de directorios por proyecto y fecha
 - Métodos: `saveImage()`, `deleteImage()`, `getImageUrl()`
 
 ## Notas Importantes

@@ -4,7 +4,6 @@ const qrcode = require('qrcode-terminal');
 const fs = require('fs');
 const path = require('path');
 const pino = require('pino');
-const { createClient } = require('@supabase/supabase-js');
 const dotenv = require('dotenv');
 const crypto = require('crypto');
 const FormData = require('form-data');
@@ -13,10 +12,7 @@ const { v4: uuidv4 } = require('uuid');
 
 dotenv.config();
 
-// Supabase configuration - Replace with your actual values
-const SUPABASE_URL = process.env.SUPABASE_URL || '';
-const SUPABASE_KEY = process.env.SUPABASE_KEY || '';
-const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
+const db = require('./db');
 
 const CHAT_API_URL = process.env.CHAT_API_URL || '';
 
@@ -116,112 +112,64 @@ try {
 logger.info(`BASE_SESSION_DIR: ${BASE_SESSION_DIR}`);
 logger.info(`Directory exists: ${fs.existsSync(BASE_SESSION_DIR)}`);
 
-// Clase para manejar el almacenamiento de archivos en Supabase
+// Clase para manejar el almacenamiento de archivos en disco local
 class FileStorage {
     constructor() {
-        this.supabase = supabase;
+        this.baseDir = process.env.FILE_STORAGE_DIR || './uploads';
+        if (!fs.existsSync(this.baseDir)) {
+            fs.mkdirSync(this.baseDir, { recursive: true });
+        }
     }
-    
+
     _generateFilename(originalFilename) {
         const fileExtension = originalFilename ? originalFilename.split('.').pop() : 'jpg';
         const timestamp = new Date().toISOString().replace(/[:.]/g, '-').split('T')[0];
         const uniqueId = uuidv4();
         return `${timestamp}_${uniqueId}.${fileExtension}`;
     }
-    
+
     async saveImage(projectId, imageBuffer, contentType = 'image/jpeg', originalFilename = 'image.jpg') {
         try {
-            const bucketName = 'imagenes';
-            
-            // Generar nombre único para el archivo
             const filename = this._generateFilename(originalFilename);
-            
-            // Crear ruta con estructura: project_id/YYYY/MM/DD/filename
             const currentDate = new Date();
-            const filePath = `${projectId}/${currentDate.getFullYear()}/${String(currentDate.getMonth() + 1).padStart(2, '0')}/${String(currentDate.getDate()).padStart(2, '0')}/${filename}`;
-            
-            // Verificar si el bucket existe
-            const { data: buckets, error: bucketsError } = await this.supabase.storage.listBuckets();
-            if (bucketsError) {
-                throw new Error(`Error al listar buckets: ${bucketsError.message}`);
+            const relPath = `${projectId}/${currentDate.getFullYear()}/${String(currentDate.getMonth() + 1).padStart(2, '0')}/${String(currentDate.getDate()).padStart(2, '0')}`;
+            const dirPath = path.join(this.baseDir, relPath);
+
+            if (!fs.existsSync(dirPath)) {
+                fs.mkdirSync(dirPath, { recursive: true });
             }
-            
-            const bucketExists = buckets.some(bucket => bucket.name === bucketName);
-            
-            if (!bucketExists) {
-                logger.info(`Creando bucket: ${bucketName}`);
-                const { error: createError } = await this.supabase.storage.createBucket(bucketName, {
-                    public: false,
-                    fileSizeLimit: 52428800, // 50MB
-                    allowedMimeTypes: ['image/jpeg', 'image/png', 'image/gif', 'image/webp']
-                });
-                
-                if (createError) {
-                    throw new Error(`Error al crear bucket: ${createError.message}`);
-                }
-            }
-            
-            // Subir archivo
-            const { error: uploadError } = await this.supabase.storage
-                .from(bucketName)
-                .upload(filePath, imageBuffer, {
-                    contentType: contentType,
-                    cacheControl: '3600',
-                    upsert: true
-                });
-            
-            if (uploadError) {
-                throw new Error(`Error al subir imagen: ${uploadError.message}`);
-            }
-            
-            // Obtener URL pública
-            const { data: urlData } = this.supabase.storage
-                .from(bucketName)
-                .getPublicUrl(filePath);
-            
-            logger.info(`Imagen guardada en Supabase: ${urlData.publicUrl}`);
-            return urlData.publicUrl;
-            
+
+            const filePath = path.join(dirPath, filename);
+            fs.writeFileSync(filePath, imageBuffer);
+
+            // Construir URL pública usando SERVER_URL
+            const serverUrl = process.env.SERVER_URL || `http://localhost:${process.env.PORT || 3002}`;
+            const publicUrl = `${serverUrl}/uploads/${relPath}/${filename}`;
+
+            logger.info(`Imagen guardada localmente: ${publicUrl}`);
+            return publicUrl;
         } catch (error) {
             logger.error(`Error al guardar imagen: ${error.message}`);
             throw error;
         }
     }
-    
+
     async deleteImage(projectId, filename) {
         try {
-            const bucketName = 'imagenes';
-            const filePath = `${projectId}/${filename}`;
-            
-            const { error } = await this.supabase.storage
-                .from(bucketName)
-                .remove([filePath]);
-            
-            if (error) {
-                throw new Error(`Error al eliminar imagen: ${error.message}`);
+            const filePath = path.join(this.baseDir, projectId, filename);
+            if (fs.existsSync(filePath)) {
+                fs.unlinkSync(filePath);
             }
-            
             return true;
         } catch (error) {
             logger.error(`Error al eliminar imagen: ${error.message}`);
             return false;
         }
     }
-    
+
     async getImageUrl(projectId, filename) {
-        try {
-            const bucketName = 'imagenes';
-            const filePath = `${projectId}/${filename}`;
-            
-            const { data } = this.supabase.storage
-                .from(bucketName)
-                .getPublicUrl(filePath);
-            
-            return data.publicUrl;
-        } catch (error) {
-            logger.error(`Error al obtener URL de imagen: ${error.message}`);
-            throw error;
-        }
+        const serverUrl = process.env.SERVER_URL || `http://localhost:${process.env.PORT || 3002}`;
+        return `${serverUrl}/uploads/${projectId}/${filename}`;
     }
 }
 
@@ -230,7 +178,6 @@ class MultiWhatsAppService {
     constructor() {
         this.connections = new Map(); // Map to store active connections
         this.qrCodes = new Map(); // Map to store QR codes
-        this.supabase = supabase; // Expose supabase instance
         this.processedMessageIds = new Map(); // Map to store processed message IDs
         this.reconnectionAttempts = new Map(); // Track reconnection attempts per integration
         this.reconnectionTimers = new Map(); // Track active reconnection timers
@@ -279,21 +226,17 @@ class MultiWhatsAppService {
         }, CLEANUP_INTERVAL);
     }
 
-    // Initialize connections from Supabase
+    // Initialize connections from database
     async initialize() {
         try {
             logger.info('Initializing WhatsApp connections from database...');
             
-            // Fetch all active integrations from Supabase
-            const { data, error } = await supabase
-                .from('integration_whatsapp_web')
-                .select('*')
-                .eq('active', true);
-                
-            if (error) {
-                throw new Error(`Failed to fetch WhatsApp integrations: ${error.message}`);
-            }
-            
+            // Fetch all active integrations from PostgreSQL
+            const { rows: data } = await db.query(
+                'SELECT * FROM integration_whatsapp_web WHERE active = $1',
+                [true]
+            );
+
             logger.info(`Found ${data?.length || 0} active WhatsApp integrations`);
             
             // Initialize each connection
@@ -316,58 +259,52 @@ class MultiWhatsAppService {
         }
     }
     
-    // Setup realtime subscription to the integrations table
-    setupDatabaseListener() {
-        logger.info('Setting up database listener for integration changes');
-        
-        const channel = supabase
-            .channel('integration_changes')
-            .on(
-                'postgres_changes',
-                {
-                    event: '*',
-                    schema: 'public',
-                    table: 'integration_whatsapp_web'
-                },
-                async (payload) => {
-                    logger.info({ eventType: payload.eventType, integrationId: payload.new?.id || payload.old?.id }, 'Integration change detected');
-                    
-                    // Handle record updates
-                    if (payload.eventType === 'UPDATE') {
-                        const integration = payload.new;
-                        if (integration.active && !this.connections.has(integration.id)) {
-                            // New active connection
-                            logger.info({ integrationId: integration.id }, 'Activating new connection');
-                            await this.createConnection(integration);
-                        } else if (!integration.active && this.connections.has(integration.id)) {
-                            // Connection deactivated
-                            logger.info({ integrationId: integration.id }, 'Deactivating connection');
-                            await this.removeConnection(integration.id);
+    // Setup PostgreSQL LISTEN/NOTIFY for integration changes
+    async setupDatabaseListener() {
+        logger.info('Setting up database listener for integration changes via LISTEN/NOTIFY');
+
+        try {
+            // Acquire a dedicated client for LISTEN
+            this.listenerClient = await db.pool.connect();
+
+            this.listenerClient.on('notification', async (msg) => {
+                try {
+                    const payload = JSON.parse(msg.payload);
+                    const eventType = payload.event;
+                    const record = payload.record || {};
+                    const oldRecord = payload.old_record || {};
+
+                    logger.info({ eventType, integrationId: record.id || oldRecord.id }, 'Integration change detected');
+
+                    if (eventType === 'UPDATE') {
+                        if (record.active && !this.connections.has(record.id)) {
+                            logger.info({ integrationId: record.id }, 'Activating new connection');
+                            await this.createConnection(record);
+                        } else if (!record.active && this.connections.has(record.id)) {
+                            logger.info({ integrationId: record.id }, 'Deactivating connection');
+                            await this.removeConnection(record.id);
                         }
                     }
-                    
-                    // Handle new records
-                    if (payload.eventType === 'INSERT' && payload.new.active) {
-                        logger.info({ integrationId: payload.new.id }, 'New integration created, setting up connection');
-                        await this.createConnection(payload.new);
+
+                    if (eventType === 'INSERT' && record.active) {
+                        logger.info({ integrationId: record.id }, 'New integration created, setting up connection');
+                        await this.createConnection(record);
                     }
-                    
-                    // Handle deleted records
-                    if (payload.eventType === 'DELETE' && this.connections.has(payload.old.id)) {
-                        logger.info({ integrationId: payload.old.id }, 'Integration deleted, removing connection');
-                        await this.removeConnection(payload.old.id);
+
+                    if (eventType === 'DELETE' && this.connections.has(oldRecord.id)) {
+                        logger.info({ integrationId: oldRecord.id }, 'Integration deleted, removing connection');
+                        await this.removeConnection(oldRecord.id);
                     }
-                }
-            )
-            .subscribe((status) => {
-                logger.info({ status }, 'Realtime subscription status');
-                if (status === 'SUBSCRIBED') {
-                    logger.info('Successfully subscribed to integration changes');
+                } catch (parseError) {
+                    logger.error({ err: parseError, rawPayload: msg.payload }, 'Error parsing NOTIFY payload');
                 }
             });
-            
-        // Store channel reference to prevent garbage collection
-        this.realtimeChannel = channel;
+
+            await this.listenerClient.query('LISTEN integration_whatsapp_web_changes');
+            logger.info('Successfully subscribed to integration_whatsapp_web_changes channel');
+        } catch (error) {
+            logger.error({ err: error }, 'Error setting up database listener. Falling back to periodic checks only.');
+        }
     }
     
     // Create a single WhatsApp connection
@@ -877,7 +814,7 @@ class MultiWhatsAppService {
         return null;
     }
     
-    // Update integration status in Supabase
+    // Update integration status in database
     async updateIntegrationStatus(integrationId, status, additionalData = null) {
         try {
             // Update the connections map with the new status
@@ -890,48 +827,51 @@ class MultiWhatsAppService {
                     connection.qrCode = additionalData;
                 }
                 
-                // Preparar datos para actualizar en Supabase
-                const updateData = {
-                    status: status,
-                    updated_at: new Date().toISOString()
-                };
-                
-                // Si el estado es 'connected', agregar información adicional
+                // Preparar datos para actualizar en PostgreSQL
+                const setClauses = ['status = $1', 'updated_at = $2'];
+                const values = [status, new Date().toISOString()];
+                let paramIndex = 3;
+
                 if (status === 'connected') {
-                    updateData.connected_at = new Date().toISOString();
-                    updateData.last_connected_at = new Date().toISOString();
-                    
-                    // Si hay información de perfil disponible, guardarla
+                    setClauses.push(`connected_at = $${paramIndex}`);
+                    values.push(new Date().toISOString());
+                    paramIndex++;
+                    setClauses.push(`last_connected_at = $${paramIndex}`);
+                    values.push(new Date().toISOString());
+                    paramIndex++;
+
                     if (connection.sock && connection.sock.user) {
-                        updateData.profile_name = connection.sock.user.name || null;
-                        updateData.profile_id = connection.sock.user.id || null;
+                        setClauses.push(`profile_name = $${paramIndex}`);
+                        values.push(connection.sock.user.name || null);
+                        paramIndex++;
+                        setClauses.push(`profile_id = $${paramIndex}`);
+                        values.push(connection.sock.user.id || null);
+                        paramIndex++;
                     }
-                    
+
                     logger.info({
                         integrationId,
                         status,
-                        updatedFields: Object.keys(updateData)
+                        updatedFields: setClauses
                     }, 'Actualizando información completa de conexión en BD');
                 }
-                
-                // Update in Supabase
-                const { error } = await supabase
-                    .from('integration_whatsapp_web')
-                    .update(updateData)
-                    .eq('id', integrationId);
-                
-                if (error) {
-                    logger.error({
-                        err: error,
-                        integrationId,
-                        status
-                    }, 'Error updating integration status in database');
-                } else {
+
+                values.push(integrationId);
+                const queryText = `UPDATE integration_whatsapp_web SET ${setClauses.join(', ')} WHERE id = $${paramIndex}`;
+
+                try {
+                    await db.query(queryText, values);
                     logger.info({
                         integrationId,
                         status,
                         success: true
                     }, 'BD actualizada correctamente');
+                } catch (dbError) {
+                    logger.error({
+                        err: dbError,
+                        integrationId,
+                        status
+                    }, 'Error updating integration status in database');
                 }
             }
         } catch (error) {
@@ -1035,40 +975,28 @@ class MultiWhatsAppService {
         // Verificar el estado del bot para este usuario
         try {
             logger.info('Verificando estado de conversación');
-            const { data: conversationState, error } = await supabase
-                .from('whatsapp_web_conversation_states')
-                .select('*')
-                .eq('project_id', integration.project_id)
-                .eq('business_account_id', integration.id)
-                .eq('phone_number_id', integration.phone_number_id)
-                .eq('user_id', senderJid)
-                .single();
+            const { rows } = await db.query(
+                `SELECT * FROM whatsapp_web_conversation_states
+                 WHERE project_id = $1 AND business_account_id = $2
+                   AND phone_number_id = $3 AND user_id = $4
+                 LIMIT 1`,
+                [integration.project_id, integration.id, integration.phone_number_id, senderJid]
+            );
+            const conversationState = rows[0] || null;
 
             logger.info('Estado de conversación verificado');
             logger.info(conversationState);
 
-            if (error && error.code !== 'PGRST116') { // PGRST116 es el código para "no se encontró"
-                logger.error({
-                    err: error,
-                    integrationId,
-                    senderJid
-                }, 'Error al verificar estado de conversación');
-                return;
-            }
-
             if (!conversationState) {
                 // Si no existe el registro, crear uno nuevo con el bot activado
-                const { error: insertError } = await supabase
-                    .from('whatsapp_web_conversation_states')
-                    .insert({
-                        project_id: integration.project_id,
-                        business_account_id: integration.id,
-                        phone_number_id: integration.phone_number_id,
-                        user_id: senderJid,
-                        bot_active: true
-                    });
-
-                if (insertError) {
+                try {
+                    await db.query(
+                        `INSERT INTO whatsapp_web_conversation_states
+                         (project_id, business_account_id, phone_number_id, user_id, bot_active)
+                         VALUES ($1, $2, $3, $4, $5)`,
+                        [integration.project_id, integration.id, integration.phone_number_id, senderJid, true]
+                    );
+                } catch (insertError) {
                     logger.error({
                         err: insertError,
                         integrationId,
@@ -1153,23 +1081,21 @@ class MultiWhatsAppService {
                 user_id: senderJid
             }, 'Datos para actualización en BD');
 
-           
-            const { error: updateError } = await supabase
-                .from('whatsapp_web_conversation_states')
-                .update({ bot_active: false })
-                .eq('project_id', connection.integration.project_id)
-                .eq('business_account_id', connection.integration.id)
-                .eq('phone_number_id', connection.integration.phone_number_id)
-                .eq('user_id', senderJid);
 
-            if (updateError) {
+            try {
+                await db.query(
+                    `UPDATE whatsapp_web_conversation_states SET bot_active = $1
+                     WHERE project_id = $2 AND business_account_id = $3
+                       AND phone_number_id = $4 AND user_id = $5`,
+                    [false, connection.integration.project_id, connection.integration.id,
+                     connection.integration.phone_number_id, senderJid]
+                );
+            } catch (updateError) {
                 logger.error({
                     err: updateError,
                     integrationId,
                     senderJid,
-                    errorCode: updateError.code,
-                    errorMessage: updateError.message,
-                    errorDetails: updateError.details
+                    errorMessage: updateError.message
                 }, 'Error al desactivar el bot');
                 return;
             }
@@ -1273,7 +1199,7 @@ class MultiWhatsAppService {
                         // Crear instancia de FileStorage
                         const fileStorage = new FileStorage();
                         
-                        // Guardar imagen en Supabase
+                        // Guardar imagen localmente
                         imageUrl = await fileStorage.saveImage(
                             integration.project_id,
                             imageBuffer,
@@ -1285,7 +1211,7 @@ class MultiWhatsAppService {
                             integrationId,
                             senderJid,
                             imageUrl
-                        }, 'Imagen guardada exitosamente en Supabase');
+                        }, 'Imagen guardada exitosamente');
                         
                         // Construir mensaje markdown para el bot
                         finalMessage = `![Imagen](${imageUrl})`;
@@ -1541,14 +1467,10 @@ class MultiWhatsAppService {
                 logger.info('Performing periodic integration check');
                 
                 // Get all active integrations from database
-                const { data, error } = await supabase
-                    .from('integration_whatsapp_web')
-                    .select('*')
-                    .eq('active', true);
-                    
-                if (error) {
-                    throw new Error(`Failed to fetch WhatsApp integrations: ${error.message}`);
-                }
+                const { rows: data } = await db.query(
+                    'SELECT * FROM integration_whatsapp_web WHERE active = $1',
+                    [true]
+                );
                 
                 // Get current active integrations
                 const activeIntegrationIds = Array.from(this.connections.keys());
@@ -1607,11 +1529,16 @@ class MultiWhatsAppService {
         this.reconnectionTimers.clear();
         this.reconnectionAttempts.clear();
         
-        // Unsubscribe from realtime channel
-        if (this.realtimeChannel) {
-            await this.realtimeChannel.unsubscribe();
-            logger.info('Unsubscribed from realtime channel');
-            this.realtimeChannel = null;
+        // Release the LISTEN client back to the pool
+        if (this.listenerClient) {
+            try {
+                await this.listenerClient.query('UNLISTEN integration_whatsapp_web_changes');
+                this.listenerClient.release();
+                logger.info('Released database listener client');
+            } catch (err) {
+                logger.error({ err }, 'Error releasing listener client');
+            }
+            this.listenerClient = null;
         }
         
         // Close all active connections

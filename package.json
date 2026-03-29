@@ -22,20 +22,20 @@
   "description": "WhatsApp API using Baileys",
   "dependencies": {
     "@hapi/boom": "^10.0.1",
-    "@supabase/supabase-js": "^2.38.4",
     "@whiskeysockets/baileys": "^6.7.18",
+    "axios": "^1.6.7",
     "body-parser": "^1.20.3",
     "cors": "^2.8.5",
     "dotenv": "^16.3.1",
     "express": "^4.21.2",
     "form-data": "^4.0.0",
-    "axios": "^1.6.7",
-    "uuid": "^9.0.1",
+    "pg": "^8.20.0",
     "pino": "^8.16.2",
     "qrcode": "^1.5.3",
     "qrcode-terminal": "^0.12.0",
     "swagger-jsdoc": "^6.2.8",
-    "swagger-ui-express": "^5.0.1"
+    "swagger-ui-express": "^5.0.1",
+    "uuid": "^9.0.1"
   },
   "devDependencies": {
     "pino-pretty": "^13.0.0"

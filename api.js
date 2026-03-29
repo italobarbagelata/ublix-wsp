@@ -7,6 +7,7 @@ const dotenv = require('dotenv');
 const swaggerJsDoc = require('swagger-jsdoc');
 const swaggerUi = require('swagger-ui-express');
 const pino = require('pino');
+const db = require('./db');
 
 // Configuración del logger
 const logger = pino({
@@ -34,6 +35,7 @@ const PORT = process.env.PORT || 3002;
 // Middleware
 app.use(bodyParser.json());
 app.use(cors());
+app.use('/uploads', express.static(path.join(__dirname, process.env.FILE_STORAGE_DIR || 'uploads')));
 
 // Configuración de Swagger
 const swaggerOptions = {
@@ -490,14 +492,14 @@ app.post('/api/connections/:integrationId/refresh', checkService, async (req, re
         // Remove and recreate the connection
         await whatsappService.removeConnection(integrationId);
         
-        // Fetch the integration data from Supabase
-        const { data, error } = await whatsappService.supabase
-            .from('integration_whatsapp_web')
-            .select('*')
-            .eq('id', integrationId)
-            .single();
-            
-        if (error || !data) {
+        // Fetch the integration data from PostgreSQL
+        const { rows } = await db.query(
+            'SELECT * FROM integration_whatsapp_web WHERE id = $1 LIMIT 1',
+            [integrationId]
+        );
+        const data = rows[0];
+
+        if (!data) {
             return res.status(404).json({
                 success: false,
                 message: 'Integration not found in database'
